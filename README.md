@@ -36,17 +36,21 @@ bundle root and into no other metadata. Delete that file to de-identify a bundle
 text in event channels can still hold identity.
 
 Writer settings come from the environment under the `ZARR_WRITER_` prefix. Every
-setting is optional.
+setting is optional. The converter exits with 2 before it reads the input when a
+setting falls outside its range.
 
-| Variable | Governs | Default |
-|---|---|---|
-| `ZARR_WRITER_STAGING_DIR` | scratch path for the atomic publish | alongside the output |
-| `ZARR_WRITER_ZSTD_LEVEL` | Zstd compression level | 5 |
-| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples | 15 |
-| `ZARR_WRITER_MIN_BINS` | bin threshold for keeping a coarser level | 1024 |
-| `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 8192 |
-| `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 16 MiB |
-| `ZARR_WRITER_VAR` | write the per-bin variance member, 0 or 1 | 0 |
+| Variable | Governs | Range | Default |
+|---|---|---|---|
+| `ZARR_WRITER_STAGING_DIR` | scratch path for the atomic publish | a non-empty path | alongside the output |
+| `ZARR_WRITER_ZSTD_LEVEL` | Zstd compression level | 0 to 22 | 5 |
+| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples | 1 to 15 | 15 |
+| `ZARR_WRITER_MIN_BINS` | bin threshold for keeping a coarser level | 1 or more | 1024 |
+| `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
+| `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
+| `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
+
+The staging directory must sit on the output's filesystem. A staging directory on
+another filesystem fails at publish, after the conversion, with exit code 1.
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
 [The library README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what

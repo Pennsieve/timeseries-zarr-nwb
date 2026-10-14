@@ -42,6 +42,15 @@ def test_main_returns_2_on_a_bad_invocation(argv):
     assert main(argv) == 2
 
 
+def test_main_returns_2_for_a_setting_outside_its_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZARR_WRITER_INNER_LEN", "0")
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 2
+    assert not out.exists()
+    assert not (tmp_path / "session.zarr.staging").exists()
+
+
 def test_main_returns_1_when_the_input_cannot_be_read(tmp_path):
     missing = tmp_path / "missing.nwb"
     assert main([str(missing), str(tmp_path / "out.zarr")]) == 1

@@ -3,9 +3,13 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from timeseries_zarr.constants import MAX_LEVELS
 from timeseries_zarr.types import WriteOpts
+
+MAX_ZSTD_LEVEL: Final = 22
+"""Highest Zstd compression level the codec accepts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,31 +33,43 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     the final output directory. The writer settings and the staging directory
     come from the ZARR_WRITER_ prefixed variables; unset settings fall back to
     the WriteOpts defaults and an unset staging directory derives from
-    final_dir. Raises ValueError on a bad invocation: an argv without exactly
-    two entries, a non-integer setting, ZARR_WRITER_MAX_LEVELS outside 1
-    through MAX_LEVELS, or ZARR_WRITER_VAR other than 0 or 1.
+    final_dir. ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL and
+    ZARR_WRITER_MAX_LEVELS takes 1 through MAX_LEVELS. ZARR_WRITER_MIN_BINS,
+    ZARR_WRITER_INNER_LEN, and ZARR_WRITER_TARGET_SHARD_BYTES take 1 or more.
+    ZARR_WRITER_VAR takes 0 or 1, and ZARR_WRITER_STAGING_DIR takes a
+    non-empty path. Raises ValueError if argv does not hold exactly two
+    entries or if a setting lies outside its range.
     """
     nwb_path, final_dir = _resolve_paths(argv)
 
     defaults = WriteOpts()
-    max_levels = _int_env(env, "ZARR_WRITER_MAX_LEVELS", defaults.max_levels)
-    if not 1 <= max_levels <= MAX_LEVELS:
-        raise ValueError(
-            f"ZARR_WRITER_MAX_LEVELS must be 1 to {MAX_LEVELS}, "
-            f"got {max_levels}"
-        )
     opts = WriteOpts(
-        zstd_level=_int_env(env, "ZARR_WRITER_ZSTD_LEVEL", defaults.zstd_level),
-        max_levels=max_levels,
-        min_bins=_int_env(env, "ZARR_WRITER_MIN_BINS", defaults.min_bins),
-        inner_len=_int_env(env, "ZARR_WRITER_INNER_LEN", defaults.inner_len),
+        zstd_level=_int_env(
+            env,
+            "ZARR_WRITER_ZSTD_LEVEL",
+            defaults.zstd_level,
+            0,
+            MAX_ZSTD_LEVEL,
+        ),
+        max_levels=_int_env(
+            env, "ZARR_WRITER_MAX_LEVELS", defaults.max_levels, 1, MAX_LEVELS
+        ),
+        min_bins=_int_env(env, "ZARR_WRITER_MIN_BINS", defaults.min_bins, 1),
+        inner_len=_int_env(env, "ZARR_WRITER_INNER_LEN", defaults.inner_len, 1),
         target_shard_bytes=_int_env(
-            env, "ZARR_WRITER_TARGET_SHARD_BYTES", defaults.target_shard_bytes
+            env,
+            "ZARR_WRITER_TARGET_SHARD_BYTES",
+            defaults.target_shard_bytes,
+            1,
         ),
         write_var=_flag_env(env, "ZARR_WRITER_VAR", defaults.write_var),
     )
 
     staging_raw = env.get("ZARR_WRITER_STAGING_DIR")
+    if staging_raw == "":
+        raise ValueError(
+            "ZARR_WRITER_STAGING_DIR must be a non-empty path, got ''"
+        )
     staging_dir = (
         Path(staging_raw)
         if staging_raw is not None
@@ -82,13 +98,31 @@ def _resolve_paths(argv: Sequence[str]) -> tuple[Path, Path]:
     return Path(argv[0]), Path(argv[1])
 
 
-def _int_env(env: Mapping[str, str], key: str, default: int) -> int:
+def _int_env(
+    env: Mapping[str, str],
+    key: str,
+    default: int,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
     """Return the integer env value for key, or default if it is unset.
 
-    Raises ValueError if the value is present but not an integer.
+    The value must lie in minimum through maximum inclusive. A maximum of
+    None leaves it unbounded above. Raises ValueError if the value is present
+    but is not an integer or lies outside that range.
     """
     raw = env.get(key)
-    return default if raw is None else int(raw)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{key} must be an integer, got {raw!r}") from None
+    if maximum is None and value < minimum:
+        raise ValueError(f"{key} must be {minimum} or more, got {value}")
+    if maximum is not None and not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be {minimum} to {maximum}, got {value}")
+    return value
 
 
 def _flag_env(env: Mapping[str, str], key: str, default: bool) -> bool:
