@@ -25,6 +25,9 @@ timeseries-zarr-nwb recording.nwb /data/recording.zarr
 `python -m timeseries_zarr_nwb` runs the same command. The exit code is 0 on success,
 2 for a bad invocation, and 1 for a failed conversion.
 
+The output path must be absent, empty, or hold a bundle from an earlier run, which the
+converter replaces.
+
 The converter reads every `ElectricalSeries` and every other numeric `TimeSeries` in
 the acquisition as continuous channels, one per column. It reads `Units` tables,
 interval tables (epochs, trials, invalid times, and any other `TimeIntervals`),
@@ -41,16 +44,12 @@ setting falls outside its range.
 
 | Variable | Governs | Range | Default |
 |---|---|---|---|
-| `ZARR_WRITER_STAGING_DIR` | scratch path for the atomic publish | a non-empty path | alongside the output |
 | `ZARR_WRITER_ZSTD_LEVEL` | Zstd compression level | 0 to 22 | 5 |
 | `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples | 1 to 15 | 15 |
 | `ZARR_WRITER_MIN_BINS` | bin threshold for keeping a coarser level | 1 or more | 1024 |
 | `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
 | `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
-
-The staging directory must sit on the output's filesystem. A staging directory on
-another filesystem fails at publish, after the conversion, with exit code 1.
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
 [The library README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what

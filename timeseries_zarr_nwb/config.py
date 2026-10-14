@@ -14,15 +14,10 @@ MAX_ZSTD_LEVEL: Final = 22
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """Everything one bundle run needs, resolved from env and argv.
-
-    staging_dir is the scratch path the bundle is built in before its atomic
-    rename onto final_dir.
-    """
+    """Everything one bundle run needs, resolved from env and argv."""
 
     nwb_path: Path
-    staging_dir: Path
-    final_dir: Path
+    output_path: Path
     opts: WriteOpts
 
 
@@ -30,17 +25,15 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     """Resolve a Config from environment variables and command-line arguments.
 
     argv holds the arguments after the program name: the input NWB path and
-    the final output directory. The writer settings and the staging directory
-    come from the ZARR_WRITER_ prefixed variables; unset settings fall back to
-    the WriteOpts defaults and an unset staging directory derives from
-    final_dir. ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL and
+    the output path. The writer settings come from the ZARR_WRITER_ prefixed
+    variables; unset settings fall back to the WriteOpts defaults.
+    ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL and
     ZARR_WRITER_MAX_LEVELS takes 1 through MAX_LEVELS. ZARR_WRITER_MIN_BINS,
     ZARR_WRITER_INNER_LEN, and ZARR_WRITER_TARGET_SHARD_BYTES take 1 or more.
-    ZARR_WRITER_VAR takes 0 or 1, and ZARR_WRITER_STAGING_DIR takes a
-    non-empty path. Raises ValueError if argv does not hold exactly two
-    entries or if a setting lies outside its range.
+    ZARR_WRITER_VAR takes 0 or 1. Raises ValueError if argv does not hold
+    exactly two entries or if a setting lies outside its range.
     """
-    nwb_path, final_dir = _resolve_paths(argv)
+    nwb_path, output_path = _resolve_paths(argv)
 
     defaults = WriteOpts()
     opts = WriteOpts(
@@ -65,34 +58,18 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
         write_var=_flag_env(env, "ZARR_WRITER_VAR", defaults.write_var),
     )
 
-    staging_raw = env.get("ZARR_WRITER_STAGING_DIR")
-    if staging_raw == "":
-        raise ValueError(
-            "ZARR_WRITER_STAGING_DIR must be a non-empty path, got ''"
-        )
-    staging_dir = (
-        Path(staging_raw)
-        if staging_raw is not None
-        else final_dir.with_name(final_dir.name + ".staging")
-    )
-
-    return Config(
-        nwb_path=nwb_path,
-        staging_dir=staging_dir,
-        final_dir=final_dir,
-        opts=opts,
-    )
+    return Config(nwb_path=nwb_path, output_path=output_path, opts=opts)
 
 
 def _resolve_paths(argv: Sequence[str]) -> tuple[Path, Path]:
-    """Return the (input NWB, final output dir) paths from argv.
+    """Return the input NWB path and the output path from argv.
 
     Raises ValueError unless argv holds exactly those two entries.
     """
     positional_count = 2
     if len(argv) != positional_count:
         raise ValueError(
-            "expected the input NWB path and the output directory as two "
+            "expected the input NWB path and the output path as two "
             f"arguments, got {len(argv)}"
         )
     return Path(argv[0]), Path(argv[1])

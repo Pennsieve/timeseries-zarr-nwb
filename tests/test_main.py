@@ -17,14 +17,33 @@ def _write_nwb(path):
     return path
 
 
-def test_main_converts_a_file_and_publishes_the_bundle(tmp_path):
+def test_main_converts_a_file_and_writes_the_bundle(tmp_path):
     nwb = _write_nwb(tmp_path / "session.nwb")
     out = tmp_path / "session.zarr"
     assert main([str(nwb), str(out)]) == 0
     assert (out / "zarr.json").exists()
     assert (out / "recording.json").exists()
     assert (out / "0" / "raw" / "zarr.json").exists()
-    assert not (tmp_path / "session.zarr.staging").exists()
+
+
+def test_main_replaces_a_bundle_from_an_earlier_run(tmp_path):
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    (out / "9").mkdir()
+    assert main([str(nwb), str(out)]) == 0
+    assert (out / "0" / "raw" / "zarr.json").exists()
+    assert not (out / "9").exists()
+
+
+def test_main_returns_1_for_an_output_directory_holding_other_files(tmp_path):
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    out.mkdir()
+    (out / "notes.txt").write_text("keep")
+    assert main([str(nwb), str(out)]) == 1
+    assert (out / "notes.txt").read_text() == "keep"
+    assert not (out / "zarr.json").exists()
 
 
 def test_main_honors_writer_settings_from_the_environment(
@@ -48,7 +67,6 @@ def test_main_returns_2_for_a_setting_outside_its_range(tmp_path, monkeypatch):
     out = tmp_path / "session.zarr"
     assert main([str(nwb), str(out)]) == 2
     assert not out.exists()
-    assert not (tmp_path / "session.zarr.staging").exists()
 
 
 def test_main_returns_1_when_the_input_cannot_be_read(tmp_path):

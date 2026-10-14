@@ -13,33 +13,12 @@ def test_two_positionals_populate_paths():
     cfg = load_config({}, ["in.nwb", "out_bundle"])
     assert isinstance(cfg, Config)
     assert cfg.nwb_path == Path("in.nwb")
-    assert cfg.final_dir == Path("out_bundle")
+    assert cfg.output_path == Path("out_bundle")
 
 
 def test_unset_settings_use_writeopts_defaults():
     cfg = load_config({}, ["in.nwb", "out_bundle"])
     assert cfg.opts == WriteOpts()
-
-
-def test_unset_staging_derives_from_final_dir():
-    cfg = load_config({}, ["in.nwb", "out_bundle"])
-    assert cfg.staging_dir != cfg.final_dir
-    assert cfg.staging_dir.parent == cfg.final_dir.parent
-
-
-def test_empty_staging_dir_raises():
-    with pytest.raises(
-        ValueError, match="^ZARR_WRITER_STAGING_DIR must be a non-empty path"
-    ):
-        load_config({"ZARR_WRITER_STAGING_DIR": ""}, ARGV)
-
-
-def test_env_staging_dir_honored():
-    cfg = load_config(
-        {"ZARR_WRITER_STAGING_DIR": "scratch/stage"},
-        ["in.nwb", "out_bundle"],
-    )
-    assert cfg.staging_dir == Path("scratch/stage")
 
 
 def test_env_settings_override_defaults():

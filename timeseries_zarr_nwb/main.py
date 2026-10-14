@@ -1,4 +1,4 @@
-"""Command-line entry point: NWB file in, published bundle out."""
+"""Command-line entry point: NWB file in, bundle out."""
 
 import logging
 import os
@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 def main(argv: Sequence[str]) -> int:
     """Run one bundle build from the command line and return an exit code.
 
-    Resolves a Config from the process environment and argv, then builds and
-    publishes the bundle for the NWB file it names. Returns 0 on success, 2 on
-    a bad invocation, 1 on a failed build.
+    Resolves a Config from the process environment and argv, then builds the
+    bundle for the NWB file it names. Returns 0 on success, 2 on a bad
+    invocation, 1 on a failed build.
     """
     try:
         cfg = load_config(os.environ, argv)
@@ -37,13 +37,12 @@ def main(argv: Sequence[str]) -> int:
                 "writing %d continuous + %d event channels to %s",
                 len(sources.continuous),
                 len(sources.events),
-                cfg.final_dir,
+                cfg.output_path,
             )
             write_bundle(
                 sources.continuous,
                 sources.events,
-                staging_dir=cfg.staging_dir,
-                final_dir=cfg.final_dir,
+                output_path=cfg.output_path,
                 opts=cfg.opts,
                 recording=sources.recording,
             )
@@ -51,7 +50,7 @@ def main(argv: Sequence[str]) -> int:
         logger.exception("failed to build bundle from %s", cfg.nwb_path)
         return 1
 
-    logger.info("published bundle to %s", cfg.final_dir)
+    logger.info("wrote bundle to %s", cfg.output_path)
     return 0
 
 
