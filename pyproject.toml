@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timeseries-zarr-nwb"
+version = "0.1.0"
+description = "Converts an NWB recording into a TS-Zarr viewer bundle"
+requires-python = ">=3.12"
+dependencies = [
+    "timeseries-zarr-py>=0.3",
+    "numpy",
+    "pynwb>=4",
+    "h5py",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+]
+dev = [
+    "mypy>=1.8.0",
+    "ruff",
+    "pre-commit",
+]
+
+[project.scripts]
+timeseries-zarr-nwb = "timeseries_zarr_nwb.main:run"
+
+[tool.setuptools.packages.find]
+include = ["timeseries_zarr_nwb*"]
+
+[tool.setuptools.package-data]
+timeseries_zarr_nwb = ["py.typed"]
+
+[tool.coverage.run]
+source = ["timeseries_zarr_nwb"]
+omit = [
+    "timeseries_zarr_nwb/__init__.py",
+    "timeseries_zarr_nwb/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "^\\s*\\.\\.\\.\\s*$",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 80
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade (modern syntax)
+    "ANN",  # flake8-annotations (require type annotations)
+    "RET",  # flake8-return
+    "SIM",  # flake8-simplify
+    "PTH",  # flake8-use-pathlib
+    "TID",  # flake8-tidy-imports
+    "N",    # pep8-naming
+    "PL",   # pylint
+    "D",    # pydocstyle (PEP 257 docstring conventions)
+]
+ignore = [
+    "E501",     # line too long (handled by formatter)
+    "B008",     # do not perform function calls in argument defaults
+    "PLR0913",  # too many arguments (adapter constructors take several)
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.pylint]
+max-args = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "C4", "ANN", "D", "PLR2004"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+files = ["timeseries_zarr_nwb"]
+
+# Third-party libraries without complete type information.
+[[tool.mypy.overrides]]
+module = [
+    "pynwb.*",
+    "hdmf.*",
+    "h5py.*",
+]
+ignore_missing_imports = true
