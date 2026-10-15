@@ -26,9 +26,10 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     argv holds the arguments after the program name: the input NWB path and
     the output path. The writer settings come from the ZARR_WRITER_ prefixed
     variables; unset settings fall back to the WriteOpts defaults.
-    ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL and
-    ZARR_WRITER_MAX_LEVELS takes 1 through MAX_LEVELS. ZARR_WRITER_MIN_BINS,
-    ZARR_WRITER_INNER_LEN, and ZARR_WRITER_TARGET_SHARD_BYTES take 1 or more.
+    ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
+    ZARR_WRITER_MAX_LEVELS takes 0 through MAX_LEVELS, and 0 writes raw
+    samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN, and
+    ZARR_WRITER_TARGET_SHARD_BYTES take 1 or more.
     ZARR_WRITER_VAR takes 0 or 1. Raises ValueError if argv does not hold
     exactly two entries or if a setting lies outside its range.
     """
@@ -44,7 +45,7 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
             MAX_ZSTD_LEVEL,
         ),
         max_levels=_int_env(
-            env, "ZARR_WRITER_MAX_LEVELS", defaults.max_levels, 1, MAX_LEVELS
+            env, "ZARR_WRITER_MAX_LEVELS", defaults.max_levels, 0, MAX_LEVELS
         ),
         min_bins=_int_env(env, "ZARR_WRITER_MIN_BINS", defaults.min_bins, 1),
         inner_len=_int_env(env, "ZARR_WRITER_INNER_LEN", defaults.inner_len, 1),
