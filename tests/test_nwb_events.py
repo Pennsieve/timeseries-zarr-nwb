@@ -10,7 +10,7 @@ from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
-from timeseries_zarr.protocols import EventChannelSource
+from timeseries_zarr import EventChannelSource
 
 from timeseries_zarr_nwb.nwb_events import (
     UNTAGGED,

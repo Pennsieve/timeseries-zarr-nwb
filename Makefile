@@ -2,7 +2,6 @@
 
 VENV_DIR      ?= venv
 PYTHON        ?= python3
-LIBRARY       ?= ../timeseries-zarr-py
 
 .DEFAULT: help
 
@@ -21,14 +20,14 @@ help:
 venv:
 	$(PYTHON) -m venv $(VENV_DIR)
 	$(VENV_DIR)/bin/pip install --upgrade pip
-	$(VENV_DIR)/bin/pip install --config-settings editable_mode=strict -e $(LIBRARY) -e ".[test,dev]"
+	$(VENV_DIR)/bin/pip install -e ".[test,dev]"
 	@echo ""
 	@echo "Virtual environment created. Activate with:"
 	@echo "  source $(VENV_DIR)/bin/activate"
 
 install:
 	$(VENV_DIR)/bin/pip install --upgrade pip
-	$(VENV_DIR)/bin/pip install --config-settings editable_mode=strict -e $(LIBRARY) -e ".[test,dev]"
+	$(VENV_DIR)/bin/pip install -e ".[test,dev]"
 
 test:
 	$(VENV_DIR)/bin/python -m pytest tests/ -v

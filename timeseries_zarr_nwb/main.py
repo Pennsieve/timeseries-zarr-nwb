@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 
 from pynwb import NWBHDF5IO
-from timeseries_zarr.bundle import write_bundle
+from timeseries_zarr import write_bundle
 
 from timeseries_zarr_nwb.config import load_config
 from timeseries_zarr_nwb.nwb_reader import build_sources_from_nwb

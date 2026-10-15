@@ -1,8 +1,7 @@
 from pathlib import Path
 
 import pytest
-from timeseries_zarr.constants import MAX_LEVELS
-from timeseries_zarr.types import WriteOpts
+from timeseries_zarr import MAX_LEVELS, WriteOpts
 
 from timeseries_zarr_nwb.config import MAX_ZSTD_LEVEL, Config, load_config
 

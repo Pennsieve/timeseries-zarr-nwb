@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Converts an NWB recording into a TS-Zarr viewer bundle"
 requires-python = ">=3.12"
 dependencies = [
-    "timeseries-zarr-py>=0.3",
+    "timeseries-zarr>=0.1.0a2",
     "numpy",
     "pynwb>=4",
     "h5py",

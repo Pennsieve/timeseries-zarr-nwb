@@ -1,18 +1,18 @@
 # timeseries-zarr-nwb
 
-Converts an NWB neurophysiology recording into a TS-Zarr 1.0 bundle. The bundle is a
-static directory of Zarr v3 arrays that a browser reads over HTTP range requests to
-render any time window interactively.
+Converts an NWB neurophysiology recording into a TS-Zarr bundle,
+a static Zarr v3 hierarchy that a browser reads over HTTP range requests to
+render time series interactively across various time spans.
 
-This package is the NWB input adapter for
-[timeseries-zarr-py](https://github.com/Pennsieve/timeseries-zarr-py), which specifies
-the format and writes the bundle. It opens an NWB file with pynwb, presents its series
-and tables as channel sources, and runs the writer.
+This package is an NWB input adapter for
+[timeseries-zarr](https://github.com/Pennsieve/timeseries-zarr-py), which specifies
+the format and writes the bundle.
+
+It opens an NWB file with `pynwb`, presents its series and tables as channel sources, and runs the writer.
 
 ## Installation
 
 ```bash
-pip install git+https://github.com/Pennsieve/timeseries-zarr-py.git
 pip install git+https://github.com/Pennsieve/timeseries-zarr-nwb.git
 ```
 
@@ -39,8 +39,7 @@ bundle root and into no other metadata. Delete that file to de-identify a bundle
 text in event channels can still hold identity.
 
 Writer settings come from the environment under the `ZARR_WRITER_` prefix. Every
-setting is optional. The converter exits with 2 before it reads the input when a
-setting falls outside its range.
+setting is optional.
 
 | Variable | Governs | Range | Default |
 |---|---|---|---|
@@ -58,17 +57,16 @@ it writes and what it costs in memory.
 ## Development
 
 Python 3.12, fully typed under `mypy --strict`, with a strict `ruff` ruleset. Tests in
-`tests/` mirror `timeseries_zarr_nwb/` one to one. `make venv` installs the library
-from `../timeseries-zarr-py` in editable mode; set `LIBRARY=` to point elsewhere.
+`tests/` mirror `timeseries_zarr_nwb/` one to one.
 
 ```bash
-make venv        # create the virtualenv and install the library and this package
+make venv        # create the virtualenv and install this package with the library from PyPI
 source venv/bin/activate
 
 make test        # pytest
 make typecheck   # mypy --strict
 make lint        # ruff check --fix + ruff format (rewrites files)
-make check       # the gate: ruff check + format check + mypy + pytest
+make check       # ruff check + format check + mypy + pytest
 make pre-commit  # install the git pre-commit hook
 ```
 
@@ -76,7 +74,7 @@ make pre-commit  # install the git pre-commit hook
 
 ## Dependencies
 
-Runtime: `timeseries-zarr-py`, `numpy`, `pynwb>=4`, `h5py`. Development: `pytest`,
+Runtime: `timeseries-zarr`, `numpy`, `pynwb>=4`, `h5py`. Development: `pytest`,
 `pytest-cov`, `pytest-mock`, `mypy`, `ruff`, `pre-commit`.
 
 ## License

@@ -12,15 +12,10 @@ from pynwb.ecephys import ElectricalSeries
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries, Units
-from timeseries_zarr.constants import (
-    MAX_LABELS,
-    MICROSECONDS_PER_SECOND,
-    UNIT_TO_UV,
-)
-from timeseries_zarr.planning import sample_period_us
-from timeseries_zarr.types import EventColumn, RecordingMeta
+from timeseries_zarr import MAX_LABELS, UNIT_TO_UV, EventColumn, RecordingMeta
 
 from timeseries_zarr_nwb.nwb_events import (
+    MICROSECONDS_PER_SECOND,
     NwbAnnotationSeriesSource,
     NwbEventsTableSource,
     NwbIntervalSource,
@@ -408,8 +403,15 @@ class NwbUnitSource:
         return self._means
 
     def waveform_period_us(self) -> float:
-        """Return the microseconds between adjacent snippet samples."""
-        return sample_period_us(self._rate_hz)
+        """Return the microseconds between adjacent snippet samples.
+
+        Raises ValueError if the waveform rate is not positive.
+        """
+        if self._rate_hz <= 0:
+            raise ValueError(
+                f"waveform_rate_hz must be positive, got {self._rate_hz!r}"
+            )
+        return MICROSECONDS_PER_SECOND / self._rate_hz
 
 
 def _iter_units_tables(nwbfile: NWBFile) -> Iterator[Units]:

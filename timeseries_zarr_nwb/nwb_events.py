@@ -12,9 +12,7 @@ import numpy.typing as npt
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries
-from timeseries_zarr.columns import text_width
-from timeseries_zarr.constants import MAX_LABELS, MICROSECONDS_PER_SECOND
-from timeseries_zarr.types import EventColumn
+from timeseries_zarr import MAX_LABELS, EventColumn, text_width
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +23,9 @@ INTERVAL_COLUMNS: Final = frozenset(
 
 UNTAGGED: Final = "untagged"
 """Label name of the category of rows that carry no tags."""
+
+MICROSECONDS_PER_SECOND: Final = 1_000_000.0
+"""Microseconds in one second, for converting NWB seconds."""
 
 
 def _json_value(value: object) -> object:

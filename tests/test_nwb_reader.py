@@ -13,7 +13,7 @@ from pynwb.testing.mock.base import mock_TimeSeries
 from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
-from timeseries_zarr.protocols import EventChannelSource
+from timeseries_zarr import EventChannelSource
 
 from timeseries_zarr_nwb.nwb_reader import (
     NwbContinuousSource,
@@ -334,6 +334,13 @@ def test_unit_waveform_mean_is_the_per_unit_table_in_float32():
 def test_unit_waveform_period_is_the_sample_period_in_microseconds():
     src = NwbUnitSource(_make_units(_TWO_UNITS), 30000.0, STARTED)
     assert src.waveform_period_us() == 1_000_000 / 30000.0
+
+
+@pytest.mark.parametrize("rate_hz", [0.0, -30000.0])
+def test_unit_waveform_period_rejects_a_non_positive_rate(rate_hz):
+    src = NwbUnitSource(_make_units(_TWO_UNITS), rate_hz, STARTED)
+    with pytest.raises(ValueError, match="must be positive"):
+        src.waveform_period_us()
 
 
 def test_unit_without_a_waveform_mean_column_offers_only_labels():
