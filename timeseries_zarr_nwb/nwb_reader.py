@@ -64,6 +64,39 @@ def _read_column(
     return np.asarray(window, dtype=np.float64)
 
 
+def _uv_factor(series: TimeSeries) -> float | None:
+    """Return the factor from the series unit to microvolts.
+
+    None means the unit is outside the volts family.
+    """
+    return UNIT_TO_UV.get(str(series.unit).lower())
+
+
+def _scale(
+    series: TimeSeries,
+    window: npt.NDArray[np.float64],
+    columns: range,
+    uv_factor: float | None,
+) -> npt.NDArray[np.float32]:
+    """Return a window of stored values as float32 in the channel unit.
+
+    window holds the stored values of the columns, rank 1 for one column or
+    shaped (rows, columns) for several. Applies the series' conversion, the
+    channel_conversion of each column when the series has one, the offset,
+    and then uv_factor when it is not None.
+    """
+    scaled = window * float(series.conversion)
+    channel_conversion = getattr(series, "channel_conversion", None)
+    if channel_conversion is not None:
+        scaled = scaled * np.asarray(
+            channel_conversion[columns.start : columns.stop], dtype=np.float64
+        )
+    scaled = scaled + float(series.offset)
+    if uv_factor is not None:
+        scaled = scaled * uv_factor
+    return scaled.astype(np.float32)
+
+
 def _channel_count(series: TimeSeries) -> int:
     """Return the number of channels a rank-1 or rank-2 series holds."""
     shape = series.data.shape
@@ -87,8 +120,14 @@ class NwbContinuousSource:
         holds one channel at index 0. reference_time is the wall-clock instant
         the series' times count from. nwb_path is the series' path in the
         file, for the provenance. Raises ValueError for a series sampled by
-        timestamps rather than a rate.
+        timestamps rather than a rate, or for a unit outside the volts
+        family.
         """
+        uv_factor = _uv_factor(electrical_series)
+        if uv_factor is None:
+            unit = str(electrical_series.unit).lower()
+            raise ValueError(f"unsupported ElectricalSeries unit: {unit!r}")
+        self._uv_factor = uv_factor
         self._series = electrical_series
         self._channel_index = channel_index
         self._reference_time = reference_time
@@ -161,20 +200,12 @@ class NwbContinuousSource:
         """Return the half-open [start, stop) sample window as float32 microvolts.
 
         Applies the series' affine scaling, then converts from the series' own
-        unit to microvolts. Raises ValueError if that unit is not a recognized
-        volts family. An empty range (stop <= start) yields a length-0 array.
+        unit to microvolts. An empty range (stop <= start) yields a length-0
+        array.
         """
         column = _read_column(self._series, self._channel_index, start, stop)
-        scaled = column * float(self._series.conversion)
-        if self._series.channel_conversion is not None:
-            scaled = scaled * float(
-                self._series.channel_conversion[self._channel_index]
-            )
-        scaled = scaled + float(self._series.offset)
-        unit = str(self._series.unit).lower()
-        if unit not in UNIT_TO_UV:
-            raise ValueError(f"unsupported ElectricalSeries unit: {unit!r}")
-        return (scaled * UNIT_TO_UV[unit]).astype(np.float32)
+        columns = range(self._channel_index, self._channel_index + 1)
+        return _scale(self._series, column, columns, self._uv_factor)
 
 
 class NwbTimeSeriesSource:
@@ -212,9 +243,8 @@ class NwbTimeSeriesSource:
         self._reference_time = reference_time
         self._nwb_path = nwb_path
         self._rate_hz = _require_rate(series)
-        unit = str(series.unit)
-        self._uv_factor = UNIT_TO_UV.get(unit.lower())
-        self._unit = unit if self._uv_factor is None else "uV"
+        self._uv_factor = _uv_factor(series)
+        self._unit = str(series.unit) if self._uv_factor is None else "uV"
 
     @property
     def series_name(self) -> str:
@@ -262,12 +292,8 @@ class NwbTimeSeriesSource:
         (stop <= start) yields a length-0 array.
         """
         column = _read_column(self._series, self._channel_index, start, stop)
-        scaled = column * float(self._series.conversion) + float(
-            self._series.offset
-        )
-        if self._uv_factor is not None:
-            scaled = scaled * self._uv_factor
-        return scaled.astype(np.float32)
+        columns = range(self._channel_index, self._channel_index + 1)
+        return _scale(self._series, column, columns, self._uv_factor)
 
 
 type ContinuousSource = NwbContinuousSource | NwbTimeSeriesSource

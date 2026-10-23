@@ -190,13 +190,12 @@ def test_read_samples_normalizes_millivolts_to_microvolts():
     assert np.array_equal(src.read_samples(0, 4), expected)
 
 
-def test_read_samples_raises_on_unknown_unit():
+def test_continuous_rejects_a_unit_outside_the_volts_family():
     data = np.arange(20, dtype=np.float64).reshape(4, 5)
     es = mock_ElectricalSeries(data=data)
     es.fields["unit"] = "furlongs"
-    src = NwbContinuousSource(es, 2, STARTED)
     with pytest.raises(ValueError, match="furlongs"):
-        src.read_samples(0, 4)
+        NwbContinuousSource(es, 2, STARTED)
 
 
 def test_continuous_unit_is_microvolts(electrical_series):
