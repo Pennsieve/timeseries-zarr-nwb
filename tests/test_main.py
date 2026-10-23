@@ -102,6 +102,35 @@ def test_main_places_data_from_the_reference_time_and_keeps_the_session_start(
     assert channel["attributes"]["tsz"]["offset_us"] == 0
 
 
+def test_main_counts_from_a_reference_time_after_the_session_start(
+    tmp_path,
+):
+    started = datetime(2021, 6, 1, 12, 0, tzinfo=UTC)
+    nwb = mock_NWBFile(
+        session_start_time=started,
+        timestamps_reference_time=started + timedelta(seconds=10),
+    )
+    mock_ElectricalSeries(
+        name="es",
+        nwbfile=nwb,
+        data=np.zeros((4096, 2)),
+        rate=1000.0,
+        starting_time=0.0,
+    )
+    path = tmp_path / "session.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    out = tmp_path / "session.zarr"
+    assert main([str(path), str(out)]) == 0
+    recording = json.loads((out / "recording.json").read_text())
+    assert recording["reference_time"] == "2021-06-01T12:00:10.000000+00:00"
+    assert (
+        recording["session"]["start_time"] == "2021-06-01T12:00:00.000000+00:00"
+    )
+    channel = json.loads((out / "0" / "zarr.json").read_text())
+    assert channel["attributes"]["tsz"]["offset_us"] == 0
+
+
 def test_main_writes_the_identifier_when_the_environment_asks(
     tmp_path, monkeypatch
 ):

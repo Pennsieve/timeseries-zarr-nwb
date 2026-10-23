@@ -640,8 +640,9 @@ def build_sources_from_nwb(
     insertion order. A table's timeseries references resolve to the ids of the
     channels of that series. Each source's provenance names the path of its
     series or table in the file. Every source counts its times from the
-    file's timestamps_reference_time. recording is the identity recording_meta
-    reads, and include_identifier passes to it. Raises ValueError if a
+    file's timestamps_reference_time, which recording names as the bundle's
+    reference time. recording is the identity recording_meta reads, and
+    include_identifier passes to it. Raises ValueError if a
     non-empty Units table is present and no ElectricalSeries supplies the
     rate, if a series is sampled by timestamps rather than a rate, or if two
     sources share an id.
@@ -762,7 +763,10 @@ def recording_meta(
 ) -> RecordingMeta:
     """Return the recording.json content an NWB file supplies.
 
-    session_start_time is the file's session start time. subject carries the
+    session_start_time is the file's session start time. reference_time is
+    the file's timestamps_reference_time, the instant every source counts its
+    times from. Bundle offsets then equal NWB seconds as whole microseconds.
+    subject carries the
     id, species, sex, age, description, and date of birth (as ISO 8601) of the
     file's Subject, and session carries the session id and description, each
     only when set. source names this converter, the writer, and the NWB format
@@ -789,6 +793,7 @@ def recording_meta(
         session["description"] = str(nwbfile.session_description)
     return RecordingMeta(
         session_start_time=nwbfile.session_start_time,
+        reference_time=nwbfile.timestamps_reference_time,
         subject=subject,
         session=session,
         source=_recording_source(

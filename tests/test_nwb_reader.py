@@ -674,6 +674,12 @@ def test_recording_meta_session_start_time_is_the_files_session_start():
     assert recording_meta(_file()).session_start_time == STARTED
 
 
+def test_recording_meta_reference_time_is_the_files_timestamps_reference():
+    reference = STARTED + timedelta(seconds=10)
+    meta = recording_meta(_file(timestamps_reference_time=reference))
+    assert meta.reference_time == reference
+
+
 def test_recording_meta_carries_every_subject_field_that_is_set():
     subject = Subject(
         subject_id="sub-0931",

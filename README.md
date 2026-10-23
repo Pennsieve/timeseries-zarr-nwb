@@ -34,8 +34,9 @@ interval tables (epochs, trials, invalid times, and any other `TimeIntervals`),
 `EventsTable` tables, and `AnnotationSeries` as event channels. Voltage samples are
 stored in microvolts. A series in any other unit keeps its unit.
 
-The subject, the session, and the wall-clock start time go into `recording.json` at the
-bundle root and into no other metadata. Its `source` object names the converter, the
+The subject, the session, the session start time, and the reference time go into
+`recording.json` at the bundle root and into no other metadata. The reference time is
+the NWB `timestamps_reference_time`, and every time in the bundle counts from it. Its `source` object names the converter, the
 writer, and the NWB schema version. It also lists the software in the file's
 `was_generated_by` field and the name, manufacturer, and model of each device. Delete
 that file to de-identify a bundle. Free text in event channels can still hold identity.
