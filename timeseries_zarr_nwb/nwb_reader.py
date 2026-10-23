@@ -740,23 +740,22 @@ def build_sources_from_nwb(
     per column, in series order then column order. Every other acquisition
     TimeSeries holding numeric samples of rank 1 or 2 follows, one channel per
     column in the same order. continuous holds one multi-channel source per
-    group of at most max_sweep_channels consecutive columns of each series,
-    and None puts every column of a series in one group. The grouping leaves
-    the channel order unchanged. Event sources follow, one per
-    non-empty table or series, in this order: Units tables (see
-    _iter_units_tables, waveform rate from the first ElectricalSeries), the
-    epochs, trials, and invalid times tables, the other interval tables by
-    name, EventsTable tables by name, and acquisition AnnotationSeries in
-    insertion order. A table's timeseries references resolve to the ids of the
-    channels of that series. Each source's provenance names the path of its
-    series or table in the file. Every source counts its times from the
-    file's timestamps_reference_time, which recording names as the bundle's
-    reference time. recording is the identity recording_meta reads, and
-    include_identifier passes to it. Raises ValueError if a
-    non-empty Units table is present and no ElectricalSeries supplies the
-    rate, if a series is sampled by timestamps rather than a rate, if an
-    ElectricalSeries unit is outside the volts family, if two sources share
-    an id, or if max_sweep_channels is below 1.
+    group of at most max_sweep_channels consecutive columns of each series, and
+    None puts every column of a series in one group. The grouping leaves the
+    channel order unchanged. Event sources follow, one per non-empty table or
+    series, in this order: Units tables (see _iter_units_tables, waveform rate
+    from the first ElectricalSeries), the epochs, trials, and invalid times
+    tables, the other interval tables by name, EventsTable tables by name, and
+    acquisition AnnotationSeries in insertion order. A table's timeseries
+    references resolve to the ids of the channels of that series. Each source's
+    provenance names the path of its series or table in the file. Every source
+    counts its times from the file's timestamps_reference_time, which recording
+    names as the bundle's reference time. recording is the identity
+    recording_meta reads, and include_identifier passes to it. Raises
+    ValueError if a non-empty Units table is present and no ElectricalSeries
+    supplies the rate, if a series is sampled by timestamps rather than a rate,
+    if an ElectricalSeries unit is outside the volts family, if two sources
+    share an id, or if max_sweep_channels is below 1.
     """
     if max_sweep_channels is not None and max_sweep_channels < 1:
         raise ValueError(
