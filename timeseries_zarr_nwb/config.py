@@ -10,18 +10,29 @@ from timeseries_zarr import MAX_LEVELS, WriteOpts
 MAX_ZSTD_LEVEL: Final = 22
 """Highest Zstd compression level the codec accepts."""
 
+DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
+"""Default bytes of raw shards held while one group of channels is read."""
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
     """Everything one bundle run needs, resolved from env and argv.
 
     include_identifier adds the NWB file identifier to recording.json.
+    sweep_bytes bounds the raw shards held while one group of channels of a
+    series is read.
     """
 
     nwb_path: Path
     output_path: Path
     opts: WriteOpts
     include_identifier: bool = False
+    sweep_bytes: int = DEFAULT_SWEEP_BYTES
+
+    @property
+    def sweep_channels(self) -> int:
+        """The most channels whose raw shards fit in sweep_bytes, at least 1."""
+        return max(1, self.sweep_bytes // self.opts.target_shard_bytes)
 
 
 def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
@@ -32,8 +43,9 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     variables; unset settings fall back to the WriteOpts defaults.
     ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
     ZARR_WRITER_MAX_LEVELS takes 0 through MAX_LEVELS, and 0 writes raw
-    samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN, and
-    ZARR_WRITER_TARGET_SHARD_BYTES take 1 or more.
+    samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
+    ZARR_WRITER_TARGET_SHARD_BYTES, and ZARR_WRITER_SWEEP_BYTES take 1 or
+    more, and ZARR_WRITER_SWEEP_BYTES defaults to DEFAULT_SWEEP_BYTES.
     ZARR_WRITER_VAR and ZARR_WRITER_INCLUDE_IDENTIFIER take 0 or 1, and
     ZARR_WRITER_INCLUDE_IDENTIFIER defaults to 0. Raises ValueError if argv
     does not hold exactly two entries or if a setting lies outside its range.
@@ -69,6 +81,9 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
         opts=opts,
         include_identifier=_flag_env(
             env, "ZARR_WRITER_INCLUDE_IDENTIFIER", default=False
+        ),
+        sweep_bytes=_int_env(
+            env, "ZARR_WRITER_SWEEP_BYTES", DEFAULT_SWEEP_BYTES, 1
         ),
     )
 

@@ -144,6 +144,34 @@ def test_main_writes_the_identifier_when_the_environment_asks(
     assert recording["source"]["identifier"] == identifier
 
 
+def _bundle_channels(out):
+    root = json.loads((out / "zarr.json").read_text())
+    return {
+        path: node["attributes"]["tsz"]["id"]
+        for path, node in root["consolidated_metadata"]["metadata"].items()
+        if "/" not in path and "tsz" in node.get("attributes", {})
+    }
+
+
+def test_main_writes_the_same_channels_when_the_sweep_splits_a_series(
+    tmp_path, monkeypatch
+):
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(
+        name="es", nwbfile=nwb, data=np.zeros((4096, 5)), rate=1000.0
+    )
+    path = tmp_path / "session.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    whole = tmp_path / "whole.zarr"
+    assert main([str(path), str(whole)]) == 0
+    monkeypatch.setenv("ZARR_WRITER_SWEEP_BYTES", "1")
+    split = tmp_path / "split.zarr"
+    assert main([str(path), str(split)]) == 0
+    assert len(_bundle_channels(whole)) == 5
+    assert _bundle_channels(split) == _bundle_channels(whole)
+
+
 @pytest.mark.parametrize("argv", [[], ["only.nwb"], ["a.nwb", "b", "c"]])
 def test_main_returns_2_on_a_bad_invocation(argv):
     assert main(argv) == 2

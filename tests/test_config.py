@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 from timeseries_zarr import MAX_LEVELS, WriteOpts
 
-from timeseries_zarr_nwb.config import MAX_ZSTD_LEVEL, Config, load_config
+from timeseries_zarr_nwb.config import (
+    DEFAULT_SWEEP_BYTES,
+    MAX_ZSTD_LEVEL,
+    Config,
+    load_config,
+)
 
 ARGV = ["in.nwb", "out_bundle"]
 
@@ -147,3 +152,44 @@ def test_rejects_an_include_identifier_value_other_than_0_or_1():
         ValueError, match="ZARR_WRITER_INCLUDE_IDENTIFIER must be 0 or 1"
     ):
         load_config({"ZARR_WRITER_INCLUDE_IDENTIFIER": "yes"}, ARGV)
+
+
+def test_sweep_bytes_defaults_to_the_default_sweep_budget():
+    assert load_config({}, ARGV).sweep_bytes == DEFAULT_SWEEP_BYTES
+
+
+def test_sweep_bytes_follows_its_variable():
+    cfg = load_config({"ZARR_WRITER_SWEEP_BYTES": "4096"}, ARGV)
+    assert cfg.sweep_bytes == 4096
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "2.5", "lots"])
+def test_sweep_bytes_rejects_a_value_that_is_not_a_positive_integer(value):
+    with pytest.raises(ValueError, match="ZARR_WRITER_SWEEP_BYTES"):
+        load_config({"ZARR_WRITER_SWEEP_BYTES": value}, ARGV)
+
+
+def test_sweep_channels_is_the_shards_that_fit_in_the_sweep_budget():
+    cfg = load_config(
+        {
+            "ZARR_WRITER_SWEEP_BYTES": "10000",
+            "ZARR_WRITER_TARGET_SHARD_BYTES": "3000",
+        },
+        ARGV,
+    )
+    assert cfg.sweep_channels == 3
+
+
+def test_sweep_channels_is_one_when_the_budget_is_below_one_shard():
+    cfg = load_config(
+        {
+            "ZARR_WRITER_SWEEP_BYTES": "100",
+            "ZARR_WRITER_TARGET_SHARD_BYTES": "3000",
+        },
+        ARGV,
+    )
+    assert cfg.sweep_channels == 1
+
+
+def test_the_default_sweep_holds_128_channels_of_default_shards():
+    assert load_config({}, ARGV).sweep_channels == 128
