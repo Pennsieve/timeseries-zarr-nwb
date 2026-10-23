@@ -751,17 +751,16 @@ def recording_meta(
 ) -> RecordingMeta:
     """Return the recording.json content an NWB file supplies.
 
-    session_start_time is the file's session start time. reference_time is
-    the file's timestamps_reference_time, the instant every source counts its
-    times from. Bundle offsets then equal NWB seconds as whole microseconds.
-    subject carries the
-    id, species, sex, age, description, and date of birth (as ISO 8601) of the
-    file's Subject, and session carries the session id and description, each
-    only when set. source names this converter, the writer, and the NWB format
-    with their versions. It lists the software in the file's was_generated_by
-    field under generated_by and the file's devices in name order under
-    devices, each only when the file holds one. include_identifier adds the
-    file identifier to source. Nothing else identifying is read: the
+    session_start_time is the file's session start time. reference_time is the
+    file's timestamps_reference_time, the instant every source counts its times
+    from. Bundle offsets then equal NWB seconds as whole microseconds. subject
+    carries the id, species, sex, age, description, and date of birth (as ISO
+    8601) of the file's Subject, and session carries the session id and
+    description, each only when set. source names this converter, the writer,
+    and the NWB format with their versions. It lists the software in the file's
+    was_generated_by field under generated_by and the file's devices in name
+    order under devices, each only when the file holds one. include_identifier
+    adds the file identifier to source. Nothing else identifying is read: the
     experimenter, the institution, the source script, and the serial numbers of
     devices stay out of the bundle.
     """

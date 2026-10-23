@@ -36,11 +36,12 @@ stored in microvolts. A series in any other unit keeps its unit.
 
 The subject, the session, the session start time, and the reference time go into
 `recording.json` at the bundle root and into no other metadata. The reference time is
-the NWB `timestamps_reference_time`, and every time in the bundle counts from it. Its `source` object names the converter, the
-writer, and the NWB schema version. It also lists the software in the file's
-`was_generated_by` field and the name, manufacturer, and model of each device. Delete
-that file to de-identify a bundle. Free text in event channels can still hold identity.
-The NWB file identifier stays out unless `ZARR_WRITER_INCLUDE_IDENTIFIER` is 1.
+the NWB `timestamps_reference_time`, and every time in the bundle counts from it. The
+`source` object of `recording.json` names the converter, the writer, and the NWB schema
+version. It also lists the software in the file's `was_generated_by` field and the name,
+manufacturer, and model of each device. Delete that file to de-identify a bundle. Free
+text in event channels can still hold identity. The NWB file identifier stays out unless
+`ZARR_WRITER_INCLUDE_IDENTIFIER` is 1.
 
 Each channel's `provenance` holds the neurodata type and the path of the NWB object it
 came from, such as `/acquisition/ElectricalSeries`. An `ElectricalSeries` channel also
