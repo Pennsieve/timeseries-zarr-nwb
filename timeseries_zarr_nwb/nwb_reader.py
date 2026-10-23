@@ -307,9 +307,6 @@ class NwbUnitSource:
         self._id = str(units.name)
         self._provenance = container_provenance(units, nwb_path)
         self._rate_hz = float(waveform_rate_hz)
-        self._start_us = round(
-            reference_time.timestamp() * MICROSECONDS_PER_SECOND
-        )
         self._label_names = [
             str(units["unit_name"][i])
             if "unit_name" in units.colnames
@@ -371,15 +368,6 @@ class NwbUnitSource:
     def provenance(self) -> dict[str, object]:
         """Return the neurodata type and the path of the table in the file."""
         return dict(self._provenance)
-
-    def start_us(self) -> int:
-        """Return the earliest wall-clock microseconds the channel holds.
-
-        The reference time, or the first spike when it precedes it.
-        """
-        if self._events.shape[0]:
-            return min(self._start_us, int(self._events[0]))
-        return self._start_us
 
     def num_events(self) -> int:
         """Return the total number of spike events across all units."""

@@ -252,20 +252,12 @@ def test_the_source_is_named_by_its_table_and_has_no_unit():
     assert src.unit is None
 
 
-def test_start_is_the_reference_time_or_an_earlier_first_event():
-    later = _source(_epochs([(5.0, 6.0, ["a"], False)]))
-    earlier = _source(_epochs([(-3.0, 6.0, ["a"], False)]))
-    assert later.start_us() == STARTED_US
-    assert earlier.start_us() == STARTED_US - 3_000_000
-
-
 def test_a_table_with_no_rows_offers_no_columns_and_no_events():
     table = TimeIntervals(name="none", description="d")
     src = _source(table)
     assert src.num_events() == 0
     assert src.columns() == frozenset()
     assert src.max_duration_us() is None
-    assert src.start_us() == STARTED_US
     assert src.read_events(0, 0).shape == (0,)
 
 
@@ -418,11 +410,6 @@ def test_events_table_is_named_by_its_table_and_has_no_unit():
     assert isinstance(src, EventChannelSource)
 
 
-def test_events_table_start_is_the_reference_time_or_an_earlier_first_event():
-    assert _marks([{"timestamp": 5.0}]).start_us() == STARTED_US
-    assert _marks([{"timestamp": -3.0}]).start_us() == STARTED_US - 3_000_000
-
-
 def test_events_table_with_no_rows_offers_no_columns():
     table = EventsTable(name="empty", description="d")
     table.add_column(name="annotation", description="a")
@@ -520,14 +507,6 @@ def test_annotation_series_is_named_by_its_series_and_serves_the_protocol():
     )
     assert (src.id, src.name, src.unit) == ("notes", "notes", None)
     assert isinstance(src, EventChannelSource)
-
-
-@_DEPRECATED
-def test_annotation_series_start_is_the_reference_time_or_an_earlier_event():
-    later = NwbAnnotationSeriesSource(_annotations(["x"], [5.0]), STARTED)
-    earlier = NwbAnnotationSeriesSource(_annotations(["x"], [-2.0]), STARTED)
-    assert later.start_us() == STARTED_US
-    assert earlier.start_us() == STARTED_US - 2_000_000
 
 
 @_DEPRECATED

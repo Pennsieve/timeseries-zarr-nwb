@@ -168,7 +168,6 @@ class _EventArrays:
         self,
         id: str,
         provenance: dict[str, object],
-        reference_us: int,
         events: npt.NDArray[np.int64],
         durations: npt.NDArray[np.int64] | None = None,
         labels: npt.NDArray[np.uint16] | None = None,
@@ -179,7 +178,6 @@ class _EventArrays:
         """Hold the arrays, which must already be sorted by event time."""
         self._id = id
         self._provenance = provenance
-        self._reference_us = reference_us
         self._events = events
         self._durations = durations
         self._labels = labels
@@ -205,12 +203,6 @@ class _EventArrays:
     def provenance(self) -> dict[str, object]:
         """Return the neurodata type and the path of the table in the file."""
         return dict(self._provenance)
-
-    def start_us(self) -> int:
-        """Return the earlier of the reference time and the first event."""
-        if self._events.shape[0]:
-            return min(self._reference_us, int(self._events[0]))
-        return self._reference_us
 
     def num_events(self) -> int:
         """Return the number of events."""
@@ -349,7 +341,6 @@ class NwbIntervalSource(_EventArrays):
         super().__init__(
             name,
             container_provenance(table, nwb_path),
-            reference_us,
             (reference_us + offsets)[order],
             durations[order],
             labels,
@@ -410,7 +401,6 @@ class NwbEventsTableSource(_EventArrays):
         super().__init__(
             name,
             container_provenance(table, nwb_path),
-            reference_us,
             (reference_us + offsets)[order],
             durations,
             texts=texts,
@@ -457,7 +447,6 @@ class NwbAnnotationSeriesSource(_EventArrays):
         super().__init__(
             name,
             container_provenance(series, nwb_path),
-            reference_us,
             (reference_us + offsets)[order],
             texts=[notes[i] for i in order] if len(stamps) else None,
         )

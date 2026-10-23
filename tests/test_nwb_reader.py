@@ -236,11 +236,6 @@ def test_unit_num_events_sums_all_units_spikes():
     assert src.num_events() == 5
 
 
-def test_unit_start_us_is_reference_time_in_microseconds():
-    src = NwbUnitSource(_make_units(_TWO_UNITS), 30000.0, STARTED)
-    assert src.start_us() == round(STARTED.timestamp() * 1_000_000)
-
-
 def test_unit_id_is_the_table_name():
     src = NwbUnitSource(
         _make_units(_TWO_UNITS, name="probeA"), 30000.0, STARTED
@@ -365,18 +360,11 @@ def test_unit_spikes_carry_no_durations_text_or_channels():
             reader(0, 2)
 
 
-def test_unit_start_is_the_first_spike_when_it_precedes_the_session():
-    specs = [([-2.0, 0.5], _WM0)]
-    src = NwbUnitSource(_make_units(specs), 30000.0, STARTED)
-    assert src.start_us() == round((STARTED.timestamp() - 2.0) * 1_000_000)
-
-
 def test_unit_table_without_units_has_no_events_and_no_columns():
     src = NwbUnitSource(Units(name="none"), 30000.0, STARTED)
     assert src.num_events() == 0
     assert src.num_labels() == 0
     assert src.columns() == frozenset()
-    assert src.start_us() == round(STARTED.timestamp() * 1_000_000)
 
 
 def test_unit_table_whose_units_have_no_spikes_has_labels_and_no_events():
