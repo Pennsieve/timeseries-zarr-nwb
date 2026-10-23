@@ -4,7 +4,7 @@ from importlib.metadata import version
 import numpy as np
 import pytest
 from hdmf.common import DynamicTableRegion
-from pynwb import NWBHDF5IO, NWBFile, TimeSeries
+from pynwb import NWBHDF5IO, H5DataIO, NWBFile, TimeSeries
 from pynwb.base import ProcessingModule
 from pynwb.device import Device, DeviceModel
 from pynwb.ecephys import ElectricalSeries
@@ -16,11 +16,18 @@ from pynwb.testing.mock.base import mock_TimeSeries
 from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
-from timeseries_zarr import EventChannelSource
+from timeseries_zarr import (
+    EventChannelSource,
+    MultiChannelSource,
+    WriteOpts,
+    write_bundle,
+)
 from timeseries_zarr import __version__ as writer_version
 
+from timeseries_zarr_nwb import nwb_reader
 from timeseries_zarr_nwb.nwb_reader import (
     NwbContinuousSource,
+    NwbSeriesSource,
     NwbTimeSeriesSource,
     NwbUnitSource,
     build_sources_from_nwb,
@@ -28,6 +35,11 @@ from timeseries_zarr_nwb.nwb_reader import (
 )
 
 STARTED = datetime(2021, 6, 1, 12, 0, tzinfo=UTC)
+
+
+def _channels(continuous):
+    """Return the channels of every series source, in bundle order."""
+    return [channel for source in continuous for channel in source.channels()]
 
 
 def _series_with_electrode_columns(extra_columns, n=3):
@@ -374,15 +386,16 @@ def test_unit_table_whose_units_have_no_spikes_has_labels_and_no_events():
     assert src.read_labels(0, 0).shape == (0,)
 
 
-def test_build_yields_one_continuous_source_per_channel():
+def test_build_yields_one_channel_per_column():
     nwb = mock_NWBFile()
     data = np.arange(50, dtype=np.float64).reshape(10, 5)
     mock_ElectricalSeries(nwbfile=nwb, data=data, rate=30000.0)
     continuous, units, _ = build_sources_from_nwb(nwb)
-    assert len(continuous) == 5
+    assert len(continuous) == 1
+    assert len(_channels(continuous)) == 5
     assert units == []
     assert np.array_equal(
-        continuous[2].read_samples(0, 10),
+        _channels(continuous)[2].read_samples(0, 10),
         (data[:, 2] * 1e6).astype(np.float32),
     )
 
@@ -500,7 +513,7 @@ def test_continuous_reads_a_rank_one_series_as_one_channel():
         src.read_samples(2, 5), (np.arange(2, 5) * 1e6).astype(np.float32)
     )
     continuous, _, _ = build_sources_from_nwb(nwb)
-    assert len(continuous) == 1
+    assert len(_channels(continuous)) == 1
 
 
 def test_continuous_rejects_a_series_sampled_by_timestamps():
@@ -587,14 +600,14 @@ def test_build_yields_plain_series_columns_after_electrical_series_columns():
         rate=512.0,
     )
     continuous, _, _ = build_sources_from_nwb(nwb)
-    assert [src.id for src in continuous] == [
+    assert [src.id for src in _channels(continuous)] == [
         "0",
         "1",
         "SpO2",
         "resp/0",
         "resp/1",
     ]
-    assert [src.unit for src in continuous] == [
+    assert [src.unit for src in _channels(continuous)] == [
         "uV",
         "uV",
         "%",
@@ -618,7 +631,7 @@ def test_build_skips_a_series_that_is_not_numeric_samples(caplog):
     )
     with caplog.at_level("WARNING"):
         continuous, _, _ = build_sources_from_nwb(nwb)
-    assert [src.id for src in continuous] == ["0", "1"]
+    assert [src.id for src in _channels(continuous)] == ["0", "1"]
     skipped = [record.getMessage() for record in caplog.records]
     assert any("notes" in message for message in skipped)
     assert any("video" in message for message in skipped)
@@ -866,7 +879,7 @@ def test_build_resolves_timeseries_references_to_the_series_channel_ids():
     nwb, es = _nwb_with_series()
     nwb.add_epoch(start_time=1.0, stop_time=2.0, tags=["a"], timeseries=[es])
     built = build_sources_from_nwb(nwb)
-    ids = [source.id for source in built.continuous]
+    ids = [source.id for source in _channels(built.continuous)]
     epochs = next(src for src in built.events if src.id == "epochs")
     assert epochs.read_channel_ids(0, 1) == [ids]
     assert "channels" in epochs.columns()
@@ -943,7 +956,8 @@ def _nwb_with_an_earlier_reference_time():
 
 def test_build_places_series_from_the_timestamps_reference_time():
     built = build_sources_from_nwb(_nwb_with_an_earlier_reference_time())
-    assert built.continuous[0].start_us() == _STARTED_US - 30_000_000
+    channel = _channels(built.continuous)[0]
+    assert channel.start_us() == _STARTED_US - 30_000_000
 
 
 def test_build_places_events_from_the_timestamps_reference_time():
@@ -1052,7 +1066,7 @@ def test_build_gives_every_source_the_path_of_its_object_in_the_file():
     built = build_sources_from_nwb(nwb)
     paths = [
         source.provenance()["nwb_path"]
-        for source in [*built.continuous, *built.events]
+        for source in [*_channels(built.continuous), *built.events]
     ]
     assert paths == [
         "/acquisition/es",
@@ -1065,3 +1079,213 @@ def test_build_gives_every_source_the_path_of_its_object_in_the_file():
         "/events/marks",
         "/acquisition/notes",
     ]
+
+
+_SAMPLES = np.random.default_rng(0).integers(-3000, 3000, (1000, 5))
+"""Stored int16 values of a 1000-row, 5-column series."""
+
+
+def _window_blocks(source):
+    """Return each channel's window blocks of a series source, concatenated."""
+    windows = list(source.iter_windows())
+    return [
+        np.concatenate([window[index] for window in windows])
+        for index in range(len(source.channels()))
+    ]
+
+
+def _assert_windows_match_read_samples(source):
+    channels = source.channels()
+    blocks = _window_blocks(source)
+    assert len(blocks) == len(channels)
+    for channel, block in zip(channels, blocks, strict=True):
+        expected = channel.read_samples(0, channel.num_samples())
+        assert block.dtype == np.float32
+        assert np.array_equal(block, expected)
+
+
+@pytest.fixture
+def small_windows(monkeypatch):
+    """Shrink the window budget so a 1000-row series spans several windows."""
+    monkeypatch.setattr(nwb_reader, "WINDOW_BYTES", 8 * 5 * 96)
+
+
+def test_series_source_serves_the_multi_channel_protocol():
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((10, 3)), rate=512.0)
+    (source,) = build_sources_from_nwb(nwb).continuous
+    assert isinstance(source, NwbSeriesSource)
+    assert isinstance(source, MultiChannelSource)
+
+
+def test_series_source_channels_are_the_column_sources_in_column_order():
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((10, 3)), rate=512.0)
+    (source,) = build_sources_from_nwb(nwb).continuous
+    channels = source.channels()
+    assert all(isinstance(c, NwbContinuousSource) for c in channels)
+    assert [c._channel_index for c in channels] == [0, 1, 2]
+
+
+def test_series_source_windows_match_electrical_series_read_samples(
+    small_windows,
+):
+    nwb = mock_NWBFile()
+    es = mock_ElectricalSeries(
+        nwbfile=nwb,
+        data=_SAMPLES.astype(np.int16),
+        rate=512.0,
+        conversion=0.195,
+        offset=-1.5,
+        channel_conversion=np.array([1.0, 0.5, 2.0, 0.25, 3.0]),
+    )
+    es.fields["unit"] = "millivolts"
+    (source,) = build_sources_from_nwb(nwb).continuous
+    assert len(list(source.iter_windows())) > 1
+    _assert_windows_match_read_samples(source)
+
+
+@pytest.mark.parametrize("unit", ["volts", "cmH2O"])
+@pytest.mark.parametrize("shape", [(1000,), (1000, 5)])
+def test_series_source_windows_match_time_series_read_samples(
+    small_windows, unit, shape
+):
+    nwb = mock_NWBFile()
+    data = _SAMPLES[:, 0] if len(shape) == 1 else _SAMPLES
+    mock_TimeSeries(
+        name="aux",
+        nwbfile=nwb,
+        data=data.astype(np.int16),
+        unit=unit,
+        rate=512.0,
+        conversion=0.5,
+        offset=1.25,
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    assert len(list(source.iter_windows())) > 1
+    _assert_windows_match_read_samples(source)
+
+
+def test_build_groups_consecutive_columns_by_max_sweep_channels():
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((10, 5)), rate=512.0)
+    grouped = build_sources_from_nwb(nwb, max_sweep_channels=2).continuous
+    whole = build_sources_from_nwb(nwb).continuous
+    assert [source._columns for source in grouped] == [
+        range(0, 2),
+        range(2, 4),
+        range(4, 5),
+    ]
+    assert [c.id for c in _channels(grouped)] == [
+        c.id for c in _channels(whole)
+    ]
+
+
+def test_build_rejects_a_max_sweep_channels_below_one():
+    with pytest.raises(ValueError, match="max_sweep_channels must be 1"):
+        build_sources_from_nwb(mock_NWBFile(), max_sweep_channels=0)
+
+
+def test_build_skips_a_series_without_columns():
+    nwb = mock_NWBFile()
+    mock_TimeSeries(
+        name="none", nwbfile=nwb, data=np.zeros((10, 0)), unit="%", rate=1.0
+    )
+    assert build_sources_from_nwb(nwb).continuous == []
+
+
+def _write_chunked_nwb(path):
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(
+        name="es",
+        nwbfile=nwb,
+        data=H5DataIO(_SAMPLES.astype(np.int16), chunks=(64, 5)),
+        rate=512.0,
+        conversion=0.195,
+        channel_conversion=np.array([1.0, 0.5, 2.0, 0.25, 3.0]),
+    )
+    mock_TimeSeries(
+        name="resp",
+        nwbfile=nwb,
+        data=_SAMPLES[:, :2].astype(np.float32),
+        unit="cmH2O",
+        rate=512.0,
+    )
+    nwb.add_epoch(start_time=0.5, stop_time=1.0)
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    return path
+
+
+def test_series_source_windows_are_whole_chunks_of_a_chunked_dataset(
+    tmp_path, small_windows
+):
+    path = _write_chunked_nwb(tmp_path / "chunked.nwb")
+    with NWBHDF5IO(str(path), mode="r") as io:
+        es_source = build_sources_from_nwb(io.read()).continuous[0]
+        assert es_source._series.data.chunks == (64, 5)
+        lengths = [len(window[0]) for window in es_source.iter_windows()]
+        _assert_windows_match_read_samples(es_source)
+    assert lengths[:-1] == [64] * (len(lengths) - 1)
+    assert sum(lengths) == 1000
+
+
+def test_series_source_window_is_one_chunk_when_the_budget_is_smaller(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(nwb_reader, "WINDOW_BYTES", 1)
+    path = _write_chunked_nwb(tmp_path / "chunked.nwb")
+    with NWBHDF5IO(str(path), mode="r") as io:
+        es_source = build_sources_from_nwb(io.read()).continuous[0]
+        lengths = {len(window[0]) for window in es_source.iter_windows()}
+    assert lengths == {64, 1000 - 15 * 64}
+
+
+def test_series_source_without_samples_yields_no_windows(tmp_path):
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((0, 2)), rate=512.0)
+    sources = build_sources_from_nwb(nwb)
+    (source,) = sources.continuous
+    assert list(source.iter_windows()) == []
+    out = tmp_path / "empty.zarr"
+    write_bundle(
+        sources.continuous,
+        [],
+        output_path=out,
+        opts=WriteOpts(),
+        recording=sources.recording,
+    )
+    assert (out / "0" / "raw" / "zarr.json").exists()
+    assert (out / "1" / "raw" / "zarr.json").exists()
+
+
+def _bundle_files(root):
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_series_sources_write_the_same_bundle_as_their_channels(
+    tmp_path, small_windows
+):
+    path = _write_chunked_nwb(tmp_path / "chunked.nwb")
+    opts = WriteOpts(inner_len=64, min_bins=4)
+    with NWBHDF5IO(str(path), mode="r") as io:
+        sources = build_sources_from_nwb(io.read(), max_sweep_channels=2)
+        assert len(sources.continuous) == 4
+        for name, continuous in (
+            ("multi", sources.continuous),
+            ("single", _channels(sources.continuous)),
+        ):
+            write_bundle(
+                continuous,
+                sources.events,
+                output_path=tmp_path / name,
+                opts=opts,
+                recording=sources.recording,
+            )
+    multi = _bundle_files(tmp_path / "multi")
+    assert (tmp_path / "multi" / "6" / "zarr.json").exists()
+    assert multi == _bundle_files(tmp_path / "single")

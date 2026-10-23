@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 MAX_SERIES_RANK = 2
 """Highest data rank a series can have and still be read as channels."""
 
+WINDOW_BYTES: Final = 64 * 2**20
+"""Most bytes of float64 samples one window of a series source holds."""
+
 
 def _require_rate(series: TimeSeries) -> float:
     """Return the series' sample rate in hertz, raising for a timestamps-only series."""
@@ -299,6 +302,94 @@ class NwbTimeSeriesSource:
 type ContinuousSource = NwbContinuousSource | NwbTimeSeriesSource
 
 
+def _window_rows(series: TimeSeries, channel_count: int) -> int:
+    """Return the rows of one window over channel_count columns of a series.
+
+    A window holds at most WINDOW_BYTES of float64 samples and at least one
+    row. When the data is chunked, a window is a whole number of chunk rows
+    and at least one chunk. No chunk is then read in two windows.
+    """
+    row_bytes = np.dtype(np.float64).itemsize * channel_count
+    rows = max(1, WINDOW_BYTES // row_bytes)
+    chunks = getattr(series.data, "chunks", None)
+    if chunks:
+        chunk_rows = int(chunks[0])
+        rows = max(chunk_rows, rows // chunk_rows * chunk_rows)
+    return rows
+
+
+class NwbSeriesSource:
+    """Consecutive columns of one NWB series, read together window by window.
+
+    Each window reads every column of the range in one access to the data.
+    The blocks of a channel hold the same values as its read_samples.
+    """
+
+    def __init__(
+        self,
+        series: TimeSeries,
+        columns: range,
+        channels: Sequence[ContinuousSource],
+    ) -> None:
+        """Bind a range of columns of a series and the channels they back.
+
+        columns is a contiguous, ascending range of column indexes, and is
+        range(0, 1) for a rank-1 series. channels holds the channel source of
+        each column of columns, in column order.
+        """
+        self._series = series
+        self._columns = columns
+        self._channels = list(channels)
+        self._uv_factor = _uv_factor(series)
+
+    def channels(self) -> Sequence[ContinuousSource]:
+        """Return the channel source of each column, in column order."""
+        return list(self._channels)
+
+    def iter_windows(self) -> Iterator[list[npt.NDArray[np.float32]]]:
+        """Yield each window of rows as one float32 block per channel.
+
+        A series with no samples yields no windows.
+        """
+        data = self._series.data
+        total = int(data.shape[0])
+        step = _window_rows(self._series, len(self._columns))
+        for start in range(0, total, step):
+            stop = min(start + step, total)
+            if len(data.shape) == 1:
+                window = data[start:stop]
+            else:
+                window = data[
+                    start:stop, self._columns.start : self._columns.stop
+                ]
+            scaled = _scale(
+                self._series,
+                np.asarray(window, dtype=np.float64),
+                self._columns,
+                self._uv_factor,
+            )
+            yield [scaled] if scaled.ndim == 1 else list(scaled.T)
+
+
+def _series_sources(
+    series: TimeSeries,
+    channels: Sequence[ContinuousSource],
+    max_channels: int | None,
+) -> Iterator[NwbSeriesSource]:
+    """Yield one series source per group of consecutive columns of a series.
+
+    channels holds the source of every column in column order. Each group
+    holds at most max_channels columns, and None puts every column in one
+    group. A series without columns yields nothing.
+    """
+    if not channels:
+        return
+    size = len(channels) if max_channels is None else max_channels
+    for start in range(0, len(channels), size):
+        stop = min(start + size, len(channels))
+        yield NwbSeriesSource(series, range(start, stop), channels[start:stop])
+
+
 class NwbUnitSource:
     """A unit (spike) channel backed by an NWB Units table.
 
@@ -531,7 +622,7 @@ type EventSource = (
 class NwbSources(NamedTuple):
     """The sources and the recording metadata discovered in one NWB file."""
 
-    continuous: list[ContinuousSource]
+    continuous: list[NwbSeriesSource]
     events: list[EventSource]
     recording: RecordingMeta
 
@@ -639,14 +730,20 @@ def _build_events(
 
 
 def build_sources_from_nwb(
-    nwbfile: NWBFile, *, include_identifier: bool = False
+    nwbfile: NWBFile,
+    *,
+    include_identifier: bool = False,
+    max_sweep_channels: int | None = None,
 ) -> NwbSources:
     """Discover the channels and recording metadata to write from an NWB file.
 
-    Every ElectricalSeries in the file's acquisition contributes one continuous
-    source per channel column, in series order then channel order. Every other
-    acquisition TimeSeries holding numeric samples of rank 1 or 2 follows, one
-    source per column in the same order. Event sources follow, one per
+    Every ElectricalSeries in the file's acquisition contributes one channel
+    per column, in series order then column order. Every other acquisition
+    TimeSeries holding numeric samples of rank 1 or 2 follows, one channel per
+    column in the same order. continuous holds one multi-channel source per
+    group of at most max_sweep_channels consecutive columns of each series,
+    and None puts every column of a series in one group. The grouping leaves
+    the channel order unchanged. Event sources follow, one per
     non-empty table or series, in this order: Units tables (see
     _iter_units_tables, waveform rate from the first ElectricalSeries), the
     epochs, trials, and invalid times tables, the other interval tables by
@@ -658,37 +755,40 @@ def build_sources_from_nwb(
     reference time. recording is the identity recording_meta reads, and
     include_identifier passes to it. Raises ValueError if a
     non-empty Units table is present and no ElectricalSeries supplies the
-    rate, if a series is sampled by timestamps rather than a rate, or if two
-    sources share an id.
+    rate, if a series is sampled by timestamps rather than a rate, if an
+    ElectricalSeries unit is outside the volts family, if two sources share
+    an id, or if max_sweep_channels is below 1.
     """
+    if max_sweep_channels is not None and max_sweep_channels < 1:
+        raise ValueError(
+            f"max_sweep_channels must be 1 or more, got {max_sweep_channels}"
+        )
     reference_time = nwbfile.timestamps_reference_time
     series = [
         acq
         for acq in nwbfile.acquisition.values()
         if isinstance(acq, ElectricalSeries)
     ]
-    continuous: list[ContinuousSource] = [
-        NwbContinuousSource(
-            es,
-            channel_index,
-            reference_time,
-            nwb_path=f"/acquisition/{es.name}",
-        )
-        for es in series
-        for channel_index in range(_channel_count(es))
+    continuous: list[NwbSeriesSource] = []
+    for es in series:
+        path = f"/acquisition/{es.name}"
+        electrodes = [
+            NwbContinuousSource(es, index, reference_time, nwb_path=path)
+            for index in range(_channel_count(es))
+        ]
+        continuous.extend(_series_sources(es, electrodes, max_sweep_channels))
+    for plain in _iter_plain_series(nwbfile):
+        path = f"/acquisition/{plain.name}"
+        columns = [
+            NwbTimeSeriesSource(plain, index, reference_time, nwb_path=path)
+            for index in range(_channel_count(plain))
+        ]
+        continuous.extend(_series_sources(plain, columns, max_sweep_channels))
+    channels = [
+        channel for source in continuous for channel in source.channels()
     ]
-    continuous.extend(
-        NwbTimeSeriesSource(
-            plain,
-            channel_index,
-            reference_time,
-            nwb_path=f"/acquisition/{plain.name}",
-        )
-        for plain in _iter_plain_series(nwbfile)
-        for channel_index in range(_channel_count(plain))
-    )
-    events = _build_events(nwbfile, series, continuous)
-    _require_unique_ids([*continuous, *events])
+    events = _build_events(nwbfile, series, channels)
+    _require_unique_ids([*channels, *events])
     return NwbSources(
         continuous,
         events,

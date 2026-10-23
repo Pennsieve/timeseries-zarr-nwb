@@ -37,7 +37,7 @@ def main(argv: Sequence[str]) -> int:
             )
             logger.info(
                 "writing %d continuous + %d event channels to %s",
-                len(sources.continuous),
+                sum(len(source.channels()) for source in sources.continuous),
                 len(sources.events),
                 cfg.output_path,
             )
