@@ -306,15 +306,14 @@ def _window_rows(series: TimeSeries, channel_count: int) -> int:
     """Return the rows of one window over channel_count columns of a series.
 
     A window holds at most WINDOW_BYTES of float64 samples and at least one
-    row. When the data is chunked, a window is a whole number of chunk rows
-    and at least one chunk. No chunk is then read in two windows.
+    row. When the data is chunked and one chunk fits in that budget, a window
+    is a whole number of chunk rows. No chunk is then read in two windows.
     """
     row_bytes = np.dtype(np.float64).itemsize * channel_count
     rows = max(1, WINDOW_BYTES // row_bytes)
     chunks = getattr(series.data, "chunks", None)
-    if chunks:
-        chunk_rows = int(chunks[0])
-        rows = max(chunk_rows, rows // chunk_rows * chunk_rows)
+    if chunks and int(chunks[0]) <= rows:
+        rows -= rows % int(chunks[0])
     return rows
 
 

@@ -483,7 +483,7 @@ def test_build_module_units_without_series_rate_raises():
         build_sources_from_nwb(nwb)
 
 
-def _one_channel_series(data, *, rate=30000.0):
+def _one_channel_series(data, *, rate=30000.0, **series_fields):
     """Build a rank-1 ElectricalSeries wired to one electrode, in a new file."""
     nwb = mock_NWBFile()
     device = mock_Device(nwbfile=nwb)
@@ -500,6 +500,7 @@ def _one_channel_series(data, *, rate=30000.0):
         electrodes=region,
         rate=rate,
         starting_time=0.0,
+        **series_fields,
     )
     nwb.add_acquisition(series)
     return nwb, series
@@ -1230,15 +1231,28 @@ def test_series_source_windows_are_whole_chunks_of_a_chunked_dataset(
     assert sum(lengths) == 1000
 
 
-def test_series_source_window_is_one_chunk_when_the_budget_is_smaller(
+def test_series_source_window_keeps_the_budget_below_one_chunk(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(nwb_reader, "WINDOW_BYTES", 1)
+    monkeypatch.setattr(nwb_reader, "WINDOW_BYTES", 8 * 5 * 40)
     path = _write_chunked_nwb(tmp_path / "chunked.nwb")
     with NWBHDF5IO(str(path), mode="r") as io:
         es_source = build_sources_from_nwb(io.read()).continuous[0]
         lengths = {len(window[0]) for window in es_source.iter_windows()}
-    assert lengths == {64, 1000 - 15 * 64}
+        _assert_windows_match_read_samples(es_source)
+    assert lengths == {40}
+
+
+def test_series_source_windows_match_a_rank_one_electrical_series(
+    small_windows,
+):
+    data = _SAMPLES[:, 0].astype(np.int16)
+    nwb, _ = _one_channel_series(
+        data, conversion=0.195, channel_conversion=[2.5]
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    assert len(list(source.iter_windows())) > 1
+    _assert_windows_match_read_samples(source)
 
 
 def test_series_source_without_samples_yields_no_windows(tmp_path):
