@@ -1,9 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 
 import numpy as np
 import pytest
 from hdmf.common import DynamicTableRegion
-from pynwb import NWBFile, TimeSeries
+from pynwb import NWBHDF5IO, NWBFile, TimeSeries
+from pynwb.base import ProcessingModule
+from pynwb.device import Device, DeviceModel
 from pynwb.ecephys import ElectricalSeries
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
@@ -14,6 +17,7 @@ from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
 from timeseries_zarr import EventChannelSource
+from timeseries_zarr import __version__ as writer_version
 
 from timeseries_zarr_nwb.nwb_reader import (
     NwbContinuousSource,
@@ -87,7 +91,7 @@ def test_continuous_init_stores_references(electrical_series):
     src = NwbContinuousSource(es, 2, started)
     assert src._series is es
     assert src._channel_index == 2
-    assert src._session_start_time == started
+    assert src._reference_time == started
 
 
 def test_rate_hz_from_series_rate(electrical_series):
@@ -104,7 +108,7 @@ def test_num_samples_is_time_axis_length(electrical_series):
     assert src.num_samples() == 10
 
 
-def test_start_us_is_session_start_plus_offset_in_microseconds(
+def test_start_us_is_reference_time_plus_offset_in_microseconds(
     electrical_series,
 ):
     es = electrical_series()  # mock starting_time is 0.0 s
@@ -232,7 +236,7 @@ def test_unit_num_events_sums_all_units_spikes():
     assert src.num_events() == 5
 
 
-def test_unit_start_us_is_session_start_in_microseconds():
+def test_unit_start_us_is_reference_time_in_microseconds():
     src = NwbUnitSource(_make_units(_TWO_UNITS), 30000.0, STARTED)
     assert src.start_us() == round(STARTED.timestamp() * 1_000_000)
 
@@ -666,8 +670,8 @@ def _file(**kwargs):
     )
 
 
-def test_recording_meta_start_is_the_session_start_time():
-    assert recording_meta(_file()).start == STARTED
+def test_recording_meta_session_start_time_is_the_files_session_start():
+    assert recording_meta(_file()).session_start_time == STARTED
 
 
 def test_recording_meta_carries_every_subject_field_that_is_set():
@@ -713,11 +717,85 @@ def test_recording_meta_session_omits_an_unset_id():
     }
 
 
-def test_recording_meta_source_names_the_converter_and_the_format():
+def test_recording_meta_source_names_the_converter_writer_and_format():
     assert recording_meta(_file()).source == {
-        "converter": "timeseries-zarr-nwb",
+        "converter": f"timeseries-zarr-nwb {version('timeseries-zarr-nwb')}",
+        "writer": f"timeseries-zarr {writer_version}",
         "format": "NWB",
     }
+
+
+def test_recording_meta_format_carries_the_schema_version_of_a_read_file(
+    tmp_path,
+):
+    path = tmp_path / "session.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(_file())
+    with NWBHDF5IO(str(path), mode="r") as io:
+        nwb = io.read()
+        expected = f"NWB {io.nwb_version[0]}"
+        assert recording_meta(nwb).source["format"] == expected
+
+
+def test_recording_meta_lists_the_software_that_generated_the_file():
+    nwb = _file(
+        was_generated_by=[["neuroconv", "0.6.1"], ["spikeinterface", "0.102"]]
+    )
+    assert recording_meta(nwb).source["generated_by"] == [
+        "neuroconv 0.6.1",
+        "spikeinterface 0.102",
+    ]
+
+
+def test_recording_meta_omits_generated_by_when_the_file_has_none():
+    assert "generated_by" not in recording_meta(_file()).source
+
+
+def test_recording_meta_lists_devices_in_name_order_with_their_model():
+    nwb = _file()
+    model = DeviceModel(name="Quantum", manufacturer="Natus", model_number="Q1")
+    nwb.add_device_model(model)
+    nwb.add_device(Device(name="scalp", model=model, serial_number="SN-9"))
+    nwb.add_device(Device(name="probe", description="64-channel probe"))
+    assert recording_meta(nwb).source["devices"] == [
+        {"name": "probe"},
+        {
+            "name": "scalp",
+            "manufacturer": "Natus",
+            "model": "Quantum",
+            "model_number": "Q1",
+        },
+    ]
+
+
+def test_recording_meta_reads_the_model_fields_of_a_device_without_a_model():
+    nwb = _file()
+    nwb.add_device(
+        Device(
+            name="amp",
+            manufacturer="Natus",
+            model_name="Quantum",
+            model_number="Q1",
+            serial_number="SN-9",
+        )
+    )
+    assert recording_meta(nwb).source["devices"] == [
+        {
+            "name": "amp",
+            "manufacturer": "Natus",
+            "model": "Quantum",
+            "model_number": "Q1",
+        }
+    ]
+
+
+def test_recording_meta_omits_devices_when_the_file_has_none():
+    assert "devices" not in recording_meta(_file()).source
+
+
+def test_recording_meta_adds_the_identifier_when_asked():
+    meta = recording_meta(_file(), include_identifier=True)
+    assert meta.source["identifier"] == "file-identifier-123"
 
 
 def test_recording_meta_leaves_other_identifying_fields_out():
@@ -726,11 +804,20 @@ def test_recording_meta_leaves_other_identifying_fields_out():
             session_id="ses-01",
             experimenter=["Doe, Jane"],
             institution="Example Hospital",
+            source_script="# written by jdoe",
+            source_script_file_name="/home/jdoe/convert.py",
             subject=Subject(subject_id="sub-1"),
+            devices=[Device(name="amp", serial_number="SN-9")],
         )
     )
     text = str((meta.subject, meta.session, meta.source))
-    for leaked in ("Doe", "Example Hospital", "file-identifier-123"):
+    for leaked in (
+        "Doe",
+        "Example Hospital",
+        "jdoe",
+        "SN-9",
+        "file-identifier-123",
+    ):
         assert leaked not in text
 
 
@@ -835,8 +922,53 @@ def test_build_reads_an_annotation_series_as_events_not_as_a_skipped_series(
 def test_build_returns_the_recording_metadata_of_the_file():
     nwb, _ = _nwb_with_series()
     built = build_sources_from_nwb(nwb)
-    assert built.recording.start == nwb.session_start_time
+    assert built.recording.session_start_time == nwb.session_start_time
     assert built.recording.source["format"] == "NWB"
+
+
+_STARTED_US = round(STARTED.timestamp() * 1_000_000)
+"""STARTED in microseconds since the Unix epoch."""
+
+
+def _nwb_with_an_earlier_reference_time():
+    nwb = NWBFile(
+        session_description="d",
+        identifier="id",
+        session_start_time=STARTED,
+        timestamps_reference_time=STARTED - timedelta(seconds=30),
+    )
+    mock_ElectricalSeries(
+        nwbfile=nwb,
+        name="es",
+        data=np.zeros((20, 1)),
+        rate=512.0,
+        starting_time=0.0,
+    )
+    nwb.add_epoch(start_time=1.0, stop_time=2.0)
+    return nwb
+
+
+def test_build_places_series_from_the_timestamps_reference_time():
+    built = build_sources_from_nwb(_nwb_with_an_earlier_reference_time())
+    assert built.continuous[0].start_us() == _STARTED_US - 30_000_000
+
+
+def test_build_places_events_from_the_timestamps_reference_time():
+    built = build_sources_from_nwb(_nwb_with_an_earlier_reference_time())
+    epochs = next(src for src in built.events if src.id == "epochs")
+    assert epochs.read_events(0, 1).tolist() == [_STARTED_US - 29_000_000]
+
+
+def test_build_keeps_the_session_start_time_when_the_reference_time_differs():
+    built = build_sources_from_nwb(_nwb_with_an_earlier_reference_time())
+    assert built.recording.session_start_time == STARTED
+
+
+def test_build_passes_include_identifier_to_the_recording_metadata():
+    nwb, _ = _nwb_with_series()
+    assert "identifier" not in build_sources_from_nwb(nwb).recording.source
+    built = build_sources_from_nwb(nwb, include_identifier=True)
+    assert built.recording.source["identifier"] == nwb.identifier
 
 
 def test_build_without_events_has_an_empty_event_list():
@@ -866,3 +998,77 @@ def test_continuous_sources_report_the_name_of_their_series():
     plain = TimeSeries(name="pulse", data=np.zeros(20), unit="bpm", rate=1.0)
     assert NwbContinuousSource(es, 1, STARTED).series_name == "es"
     assert NwbTimeSeriesSource(plain, 0, STARTED).series_name == "pulse"
+
+
+def test_electrical_series_provenance_names_the_series_filtering_and_device(
+    electrical_series,
+):
+    es = electrical_series(filtering="300-6000 Hz bandpass")
+    src = NwbContinuousSource(
+        es, 1, STARTED, nwb_path="/acquisition/ElectricalSeries"
+    )
+    device = es.electrodes.table["group"][es.electrodes.data[1]].device
+    assert src.provenance() == {
+        "neurodata_type": "ElectricalSeries",
+        "nwb_path": "/acquisition/ElectricalSeries",
+        "filtering": "300-6000 Hz bandpass",
+        "device": device.name,
+    }
+
+
+def test_electrical_series_provenance_omits_unset_filtering(electrical_series):
+    src = NwbContinuousSource(electrical_series(filtering=None), 0, STARTED)
+    assert "filtering" not in src.provenance()
+
+
+def test_time_series_provenance_names_the_type_and_the_path():
+    pulse = TimeSeries(name="pulse", data=np.zeros(4), unit="bpm", rate=1.0)
+    src = NwbTimeSeriesSource(pulse, 0, STARTED, nwb_path="/acquisition/pulse")
+    assert src.provenance() == {
+        "neurodata_type": "TimeSeries",
+        "nwb_path": "/acquisition/pulse",
+    }
+
+
+def test_unit_provenance_names_the_type_and_the_path():
+    src = NwbUnitSource(
+        _make_units(_TWO_UNITS), 30000.0, STARTED, nwb_path="/units"
+    )
+    assert src.provenance() == {
+        "neurodata_type": "Units",
+        "nwb_path": "/units",
+    }
+
+
+@pytest.mark.filterwarnings("ignore:AnnotationSeries is deprecated:UserWarning")
+def test_build_gives_every_source_the_path_of_its_object_in_the_file():
+    nwb, es = _nwb_with_series(n_channels=2)
+    nwb.add_acquisition(
+        TimeSeries(name="pulse", data=np.zeros(20), unit="bpm", rate=512.0)
+    )
+    nwb.units = _make_units(_TWO_UNITS, name="units")
+    module = ProcessingModule(name="ecephys", description="d")
+    nwb.add_processing_module(module)
+    module.add(_make_units(_TWO_UNITS, name="sorted"))
+    nwb.add_epoch(start_time=1.0, stop_time=2.0, timeseries=[es])
+    nwb.add_time_intervals(_interval_table("alpha"))
+    nwb.add_events_table(_events_table("marks"))
+    nwb.add_acquisition(
+        AnnotationSeries(name="notes", data=["x"], timestamps=[1.0])
+    )
+    built = build_sources_from_nwb(nwb)
+    paths = [
+        source.provenance()["nwb_path"]
+        for source in [*built.continuous, *built.events]
+    ]
+    assert paths == [
+        "/acquisition/es",
+        "/acquisition/es",
+        "/acquisition/pulse",
+        "/units",
+        "/processing/ecephys/sorted",
+        "/intervals/epochs",
+        "/intervals/alpha",
+        "/events/marks",
+        "/acquisition/notes",
+    ]

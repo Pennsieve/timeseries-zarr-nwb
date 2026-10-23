@@ -9,9 +9,10 @@ from typing import Final
 
 import numpy as np
 import numpy.typing as npt
+from pynwb import TimeSeries
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
-from pynwb.misc import AnnotationSeries
+from pynwb.misc import AnnotationSeries, Units
 from timeseries_zarr import MAX_LABELS, EventColumn, text_width
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,23 @@ def _as_text(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def container_provenance(
+    container: TimeSeries | TimeIntervals | EventsTable | Units,
+    nwb_path: str | None,
+) -> dict[str, object]:
+    """Return the provenance of a channel read from one NWB object.
+
+    It holds the neurodata type of the object and, when nwb_path is not None,
+    the path of the object in the file, such as /acquisition/ElectricalSeries.
+    """
+    provenance: dict[str, object] = {
+        "neurodata_type": str(container.neurodata_type)
+    }
+    if nwb_path is not None:
+        provenance["nwb_path"] = nwb_path
+    return provenance
 
 
 def _to_microseconds(
@@ -149,7 +167,8 @@ class _EventArrays:
     def __init__(
         self,
         id: str,
-        session_us: int,
+        provenance: dict[str, object],
+        reference_us: int,
         events: npt.NDArray[np.int64],
         durations: npt.NDArray[np.int64] | None = None,
         labels: npt.NDArray[np.uint16] | None = None,
@@ -159,7 +178,8 @@ class _EventArrays:
     ) -> None:
         """Hold the arrays, which must already be sorted by event time."""
         self._id = id
-        self._session_us = session_us
+        self._provenance = provenance
+        self._reference_us = reference_us
         self._events = events
         self._durations = durations
         self._labels = labels
@@ -182,11 +202,15 @@ class _EventArrays:
         """Always None: these events have no measurement."""
         return None
 
+    def provenance(self) -> dict[str, object]:
+        """Return the neurodata type and the path of the table in the file."""
+        return dict(self._provenance)
+
     def start_us(self) -> int:
-        """Return the earlier of the session start and the first event."""
+        """Return the earlier of the reference time and the first event."""
         if self._events.shape[0]:
-            return min(self._session_us, int(self._events[0]))
-        return self._session_us
+            return min(self._reference_us, int(self._events[0]))
+        return self._reference_us
 
     def num_events(self) -> int:
         """Return the number of events."""
@@ -290,15 +314,18 @@ class NwbIntervalSource(_EventArrays):
     def __init__(
         self,
         table: TimeIntervals,
-        session_start_time: datetime,
+        reference_time: datetime,
         channel_ids_by_series: Mapping[str, Sequence[str]],
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind a TimeIntervals table as an event channel.
 
-        session_start_time places the table's seconds, which count from it, in
+        reference_time places the table's seconds, which count from it, in
         absolute microseconds. channel_ids_by_series maps the name of each
         series the bundle holds to the ids of that series' channels. A
         reference to a series the mapping lacks is ignored with a warning.
+        nwb_path is the table's path in the file, for the provenance.
         Each distinct tag tuple, with its tags sorted, is one label category,
         in sorted order, and a row without tags is the category "untagged". A
         table with no tags in any row has no labels. Raises ValueError if a
@@ -306,8 +333,8 @@ class NwbIntervalSource(_EventArrays):
         outnumber MAX_LABELS.
         """
         name = str(table.name)
-        session_us = round(
-            session_start_time.timestamp() * MICROSECONDS_PER_SECOND
+        reference_us = round(
+            reference_time.timestamp() * MICROSECONDS_PER_SECOND
         )
         starts = np.asarray(table["start_time"][:], dtype=np.float64)
         stops = np.asarray(table["stop_time"][:], dtype=np.float64)
@@ -321,8 +348,9 @@ class NwbIntervalSource(_EventArrays):
         labels, label_names = _read_labels(table, rows, order)
         super().__init__(
             name,
-            session_us,
-            (session_us + offsets)[order],
+            container_provenance(table, nwb_path),
+            reference_us,
+            (reference_us + offsets)[order],
             durations[order],
             labels,
             label_names,
@@ -342,18 +370,21 @@ class NwbEventsTableSource(_EventArrays):
     def __init__(
         self,
         table: EventsTable,
-        session_start_time: datetime,
+        reference_time: datetime,
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind an EventsTable as an event channel.
 
-        session_start_time places the table's seconds, which count from it, in
-        absolute microseconds. Columns other than timestamp, duration, and
+        reference_time places the table's seconds, which count from it, in
+        absolute microseconds. nwb_path is the table's path in the file, for
+        the provenance. Columns other than timestamp, duration, and
         annotation are ignored with a warning. Raises ValueError if a
         timestamp or duration is not finite or a duration is negative.
         """
         name = str(table.name)
-        session_us = round(
-            session_start_time.timestamp() * MICROSECONDS_PER_SECOND
+        reference_us = round(
+            reference_time.timestamp() * MICROSECONDS_PER_SECOND
         )
         stamps = np.asarray(table["timestamp"][:], dtype=np.float64)
         offsets = _to_microseconds(stamps, "timestamp", name)
@@ -378,8 +409,9 @@ class NwbEventsTableSource(_EventArrays):
             logger.warning("%s: columns %s are not carried", name, ignored)
         super().__init__(
             name,
-            session_us,
-            (session_us + offsets)[order],
+            container_provenance(table, nwb_path),
+            reference_us,
+            (reference_us + offsets)[order],
             durations,
             texts=texts,
         )
@@ -396,12 +428,15 @@ class NwbAnnotationSeriesSource(_EventArrays):
     def __init__(
         self,
         series: AnnotationSeries,
-        session_start_time: datetime,
+        reference_time: datetime,
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind an AnnotationSeries as an event channel.
 
-        session_start_time places the series' timestamps, which count from it
-        in seconds, in absolute microseconds. Raises ValueError if the series
+        reference_time places the series' timestamps, which count from it
+        in seconds, in absolute microseconds. nwb_path is the series' path in
+        the file, for the provenance. Raises ValueError if the series
         has no timestamps, its data and timestamps differ in length, or a
         timestamp is not finite.
         """
@@ -414,14 +449,15 @@ class NwbAnnotationSeriesSource(_EventArrays):
             raise ValueError(
                 f"{name} has {len(notes)} texts but {len(stamps)} timestamps"
             )
-        session_us = round(
-            session_start_time.timestamp() * MICROSECONDS_PER_SECOND
+        reference_us = round(
+            reference_time.timestamp() * MICROSECONDS_PER_SECOND
         )
         offsets = _to_microseconds(stamps, "timestamp", name)
         order = np.argsort(stamps, kind="stable")
         super().__init__(
             name,
-            session_us,
-            (session_us + offsets)[order],
+            container_provenance(series, nwb_path),
+            reference_us,
+            (reference_us + offsets)[order],
             texts=[notes[i] for i in order] if len(stamps) else None,
         )

@@ -32,7 +32,9 @@ def main(argv: Sequence[str]) -> int:
         # inside the context manager.
         with NWBHDF5IO(str(cfg.nwb_path), mode="r") as io:
             nwbfile = io.read()
-            sources = build_sources_from_nwb(nwbfile)
+            sources = build_sources_from_nwb(
+                nwbfile, include_identifier=cfg.include_identifier
+            )
             logger.info(
                 "writing %d continuous + %d event channels to %s",
                 len(sources.continuous),

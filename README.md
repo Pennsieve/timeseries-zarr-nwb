@@ -35,8 +35,16 @@ interval tables (epochs, trials, invalid times, and any other `TimeIntervals`),
 stored in microvolts. A series in any other unit keeps its unit.
 
 The subject, the session, and the wall-clock start time go into `recording.json` at the
-bundle root and into no other metadata. Delete that file to de-identify a bundle. Free
-text in event channels can still hold identity.
+bundle root and into no other metadata. Its `source` object names the converter, the
+writer, and the NWB schema version. It also lists the software in the file's
+`was_generated_by` field and the name, manufacturer, and model of each device. Delete
+that file to de-identify a bundle. Free text in event channels can still hold identity.
+The NWB file identifier stays out unless `ZARR_WRITER_INCLUDE_IDENTIFIER` is 1.
+
+Each channel's `provenance` holds the neurodata type and the path of the NWB object it
+came from, such as `/acquisition/ElectricalSeries`. An `ElectricalSeries` channel also
+carries the series' `filtering` and the name of its electrode's device when the file
+records them.
 
 Writer settings come from the environment under the `ZARR_WRITER_` prefix. Every
 setting is optional.
@@ -49,6 +57,7 @@ setting is optional.
 | `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
 | `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
+| `ZARR_WRITER_INCLUDE_IDENTIFIER` | add the NWB file identifier to `recording.json` | 0 or 1 | 0 |
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
 [The library README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what

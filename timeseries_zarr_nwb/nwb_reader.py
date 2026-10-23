@@ -3,22 +3,26 @@
 import logging
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime
+from importlib.metadata import version
 from typing import Final, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
 from pynwb import NWBFile, TimeSeries
+from pynwb.device import Device
 from pynwb.ecephys import ElectricalSeries
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries, Units
 from timeseries_zarr import MAX_LABELS, UNIT_TO_UV, EventColumn, RecordingMeta
+from timeseries_zarr import __version__ as writer_version
 
 from timeseries_zarr_nwb.nwb_events import (
     MICROSECONDS_PER_SECOND,
     NwbAnnotationSeriesSource,
     NwbEventsTableSource,
     NwbIntervalSource,
+    container_provenance,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,11 +41,9 @@ def _require_rate(series: TimeSeries) -> float:
     return float(series.rate)
 
 
-def _start_us(series: TimeSeries, session_start_time: datetime) -> int:
+def _start_us(series: TimeSeries, reference_time: datetime) -> int:
     """Return wall-clock microseconds of sample 0, rounded to whole microseconds."""
-    start_s: float = session_start_time.timestamp() + float(
-        series.starting_time
-    )
+    start_s: float = reference_time.timestamp() + float(series.starting_time)
     return round(start_s * MICROSECONDS_PER_SECOND)
 
 
@@ -75,18 +77,22 @@ class NwbContinuousSource:
         self,
         electrical_series: ElectricalSeries,
         channel_index: int,
-        session_start_time: datetime,
+        reference_time: datetime,
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind one channel of an ElectricalSeries as a continuous source.
 
         channel_index selects the column this source exposes; a rank-1 series
-        holds one channel at index 0. session_start_time is the recording's
-        wall-clock origin. Raises ValueError for a series sampled by timestamps
-        rather than a rate.
+        holds one channel at index 0. reference_time is the wall-clock instant
+        the series' times count from. nwb_path is the series' path in the
+        file, for the provenance. Raises ValueError for a series sampled by
+        timestamps rather than a rate.
         """
         self._series = electrical_series
         self._channel_index = channel_index
-        self._session_start_time = session_start_time
+        self._reference_time = reference_time
+        self._nwb_path = nwb_path
         self._rate_hz = _require_rate(electrical_series)
 
     @property
@@ -117,6 +123,24 @@ class NwbContinuousSource:
         """Always "uV"; read_samples normalizes every series to microvolts."""
         return "uV"
 
+    def provenance(self) -> dict[str, object]:
+        """Return the series' neurodata type and path, filtering, and device.
+
+        filtering is the series' description of the filters applied to it.
+        device is the name of the device of the electrode's group. Each one is
+        left out when the file does not record it.
+        """
+        provenance = container_provenance(self._series, self._nwb_path)
+        if self._series.filtering:
+            provenance["filtering"] = str(self._series.filtering)
+        electrodes = self._series.electrodes
+        table = electrodes.table
+        if "group" in table.colnames:
+            group = table["group"][electrodes.data[self._channel_index]]
+            if group.device is not None:
+                provenance["device"] = str(group.device.name)
+        return provenance
+
     def rate_hz(self) -> float:
         """Return the ElectricalSeries' sample rate in hertz."""
         return self._rate_hz
@@ -124,10 +148,10 @@ class NwbContinuousSource:
     def start_us(self) -> int:
         """Return the wall-clock microseconds of sample index 0.
 
-        The session start plus the series' own start offset, rounded to whole
+        The reference time plus the series' own start offset, rounded to whole
         microseconds.
         """
-        return _start_us(self._series, self._session_start_time)
+        return _start_us(self._series, self._reference_time)
 
     def num_samples(self) -> int:
         """Return the length of the series' time axis, shared by every channel."""
@@ -166,12 +190,15 @@ class NwbTimeSeriesSource:
         self,
         series: TimeSeries,
         channel_index: int,
-        session_start_time: datetime,
+        reference_time: datetime,
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind one channel of a TimeSeries as a continuous source.
 
         channel_index selects the column of a rank-2 series and is 0 for a
-        rank-1 series. Raises ValueError for a series sampled by timestamps
+        rank-1 series. nwb_path is the series' path in the file, for the
+        provenance. Raises ValueError for a series sampled by timestamps
         rather than a rate, or whose data has a rank above 2.
         """
         rank = len(series.data.shape)
@@ -182,7 +209,8 @@ class NwbTimeSeriesSource:
             )
         self._series = series
         self._channel_index = channel_index
-        self._session_start_time = session_start_time
+        self._reference_time = reference_time
+        self._nwb_path = nwb_path
         self._rate_hz = _require_rate(series)
         unit = str(series.unit)
         self._uv_factor = UNIT_TO_UV.get(unit.lower())
@@ -210,13 +238,17 @@ class NwbTimeSeriesSource:
         """The series unit, or "uV" when that unit is in the volts family."""
         return self._unit
 
+    def provenance(self) -> dict[str, object]:
+        """Return the neurodata type and the path of the series in the file."""
+        return container_provenance(self._series, self._nwb_path)
+
     def rate_hz(self) -> float:
         """Return the series' sample rate in hertz."""
         return self._rate_hz
 
     def start_us(self) -> int:
         """Return the wall-clock microseconds of sample index 0."""
-        return _start_us(self._series, self._session_start_time)
+        return _start_us(self._series, self._reference_time)
 
     def num_samples(self) -> int:
         """Return the length of the series' time axis, shared by every channel."""
@@ -255,13 +287,16 @@ class NwbUnitSource:
         self,
         units: Units,
         waveform_rate_hz: float,
-        session_start_time: datetime,
+        reference_time: datetime,
+        *,
+        nwb_path: str | None = None,
     ) -> None:
         """Bind an NWB Units table as a flattened per-event spike source.
 
         waveform_rate_hz is the sample rate within a waveform; the table
-        carries no rate of its own. session_start_time places event timestamps
-        in absolute microseconds. Raises ValueError if the table holds more
+        carries no rate of its own. reference_time places event timestamps
+        in absolute microseconds. nwb_path is the table's path in the file,
+        for the provenance. Raises ValueError if the table holds more
         than MAX_LABELS units, past the uint16 label range, or if the units'
         waveform_mean snippets differ in width.
         """
@@ -270,9 +305,10 @@ class NwbUnitSource:
             raise ValueError(f"a unit channel holds at most {MAX_LABELS} units")
 
         self._id = str(units.name)
+        self._provenance = container_provenance(units, nwb_path)
         self._rate_hz = float(waveform_rate_hz)
         self._start_us = round(
-            session_start_time.timestamp() * MICROSECONDS_PER_SECOND
+            reference_time.timestamp() * MICROSECONDS_PER_SECOND
         )
         self._label_names = [
             str(units["unit_name"][i])
@@ -281,7 +317,7 @@ class NwbUnitSource:
             for i in range(unit_count)
         ]
 
-        session_s = session_start_time.timestamp()
+        reference_s = reference_time.timestamp()
         times: list[npt.NDArray[np.float64]] = []
         labels: list[npt.NDArray[np.uint16]] = []
         for cluster_id in range(unit_count):
@@ -295,7 +331,7 @@ class NwbUnitSource:
         all_times = np.concatenate(times) if times else np.empty(0)
         order = np.argsort(all_times, kind="stable")
         self._events = (
-            ((all_times[order] + session_s) * MICROSECONDS_PER_SECOND)
+            ((all_times[order] + reference_s) * MICROSECONDS_PER_SECOND)
             .round()
             .astype(np.int64)
         )
@@ -332,10 +368,14 @@ class NwbUnitSource:
         """
         return None
 
+    def provenance(self) -> dict[str, object]:
+        """Return the neurodata type and the path of the table in the file."""
+        return dict(self._provenance)
+
     def start_us(self) -> int:
         """Return the earliest wall-clock microseconds the channel holds.
 
-        The recording start, or the first spike when it precedes the start.
+        The reference time, or the first spike when it precedes it.
         """
         if self._events.shape[0]:
             return min(self._start_us, int(self._events[0]))
@@ -414,21 +454,21 @@ class NwbUnitSource:
         return MICROSECONDS_PER_SECOND / self._rate_hz
 
 
-def _iter_units_tables(nwbfile: NWBFile) -> Iterator[Units]:
-    """Yield every Units table in the file in deterministic discovery order.
+def _iter_units_tables(nwbfile: NWBFile) -> Iterator[tuple[str, Units]]:
+    """Yield the path and table of every Units table in discovery order.
 
     The root Units table first when present, then the Units containers of each
     processing module, modules in name order and their containers in name
     order.
     """
     if nwbfile.units is not None:
-        yield nwbfile.units
+        yield "/units", nwbfile.units
     for module_name in sorted(nwbfile.processing):
         module = nwbfile.processing[module_name]
         for container_name in sorted(module.data_interfaces):
             container = module.data_interfaces[container_name]
             if isinstance(container, Units):
-                yield container
+                yield f"/processing/{module_name}/{container_name}", container
 
 
 def _holds_channel_data(series: TimeSeries) -> bool:
@@ -497,8 +537,10 @@ def _require_unique_ids(
         seen.add(source.id)
 
 
-def _iter_interval_tables(nwbfile: NWBFile) -> Iterator[TimeIntervals]:
-    """Yield every TimeIntervals table once, in discovery order.
+def _iter_interval_tables(
+    nwbfile: NWBFile,
+) -> Iterator[tuple[str, TimeIntervals]]:
+    """Yield the path and table of every TimeIntervals table once, in order.
 
     The epochs, trials, and invalid times tables come first, in that order,
     then the file's other interval tables in name order.
@@ -509,30 +551,36 @@ def _iter_interval_tables(nwbfile: NWBFile) -> Iterator[TimeIntervals]:
     for table in named:
         if table is not None and id(table) not in seen:
             seen.add(id(table))
-            yield table
+            yield f"/intervals/{table.name}", table
 
 
-def _iter_events_tables(nwbfile: NWBFile) -> Iterator[EventsTable]:
-    """Yield the file's EventsTable tables in name order."""
+def _iter_events_tables(
+    nwbfile: NWBFile,
+) -> Iterator[tuple[str, EventsTable]]:
+    """Yield the path and table of the file's EventsTable tables in name order."""
     tables = getattr(nwbfile, "events", None) or {}
     for name in sorted(tables):
-        yield tables[name]
+        yield f"/events/{name}", tables[name]
 
 
-def _iter_annotation_series(nwbfile: NWBFile) -> Iterator[AnnotationSeries]:
-    """Yield the acquisition AnnotationSeries in insertion order."""
-    for acq in nwbfile.acquisition.values():
+def _iter_annotation_series(
+    nwbfile: NWBFile,
+) -> Iterator[tuple[str, AnnotationSeries]]:
+    """Yield the path and series of each acquisition AnnotationSeries in order."""
+    for name, acq in nwbfile.acquisition.items():
         if isinstance(acq, AnnotationSeries):
-            yield acq
+            yield f"/acquisition/{name}", acq
 
 
-def _non_empty[T](tables: Iterable[T], size: Callable[[T], int]) -> Iterator[T]:
-    """Yield the tables or series that hold something, logging the others."""
-    for table in tables:
+def _non_empty[T](
+    tables: Iterable[tuple[str, T]], size: Callable[[T], int]
+) -> Iterator[tuple[str, T]]:
+    """Yield the paths and tables that hold something, logging the others."""
+    for path, table in tables:
         if size(table):
-            yield table
+            yield path, table
         else:
-            logger.info("skipping empty %s", getattr(table, "name", table))
+            logger.info("skipping empty %s", path)
 
 
 def _build_events(
@@ -541,7 +589,7 @@ def _build_events(
     continuous: Sequence[ContinuousSource],
 ) -> list[EventSource]:
     """Build one event source per non-empty table or annotation series."""
-    session_start = nwbfile.session_start_time
+    reference_time = nwbfile.timestamps_reference_time
     channel_ids_by_series: dict[str, list[str]] = {}
     for source in continuous:
         channel_ids_by_series.setdefault(source.series_name, []).append(
@@ -549,30 +597,36 @@ def _build_events(
         )
 
     events: list[EventSource] = []
-    for units in _non_empty(_iter_units_tables(nwbfile), len):
+    for path, units in _non_empty(_iter_units_tables(nwbfile), len):
         if not series:
             raise ValueError("unit channels need an ElectricalSeries rate")
         events.append(
-            NwbUnitSource(units, float(series[0].rate), session_start)
+            NwbUnitSource(
+                units, float(series[0].rate), reference_time, nwb_path=path
+            )
         )
     events.extend(
-        NwbIntervalSource(table, session_start, channel_ids_by_series)
-        for table in _non_empty(_iter_interval_tables(nwbfile), len)
+        NwbIntervalSource(
+            table, reference_time, channel_ids_by_series, nwb_path=path
+        )
+        for path, table in _non_empty(_iter_interval_tables(nwbfile), len)
     )
     events.extend(
-        NwbEventsTableSource(table, session_start)
-        for table in _non_empty(_iter_events_tables(nwbfile), len)
+        NwbEventsTableSource(table, reference_time, nwb_path=path)
+        for path, table in _non_empty(_iter_events_tables(nwbfile), len)
     )
     events.extend(
-        NwbAnnotationSeriesSource(annotations, session_start)
-        for annotations in _non_empty(
+        NwbAnnotationSeriesSource(annotations, reference_time, nwb_path=path)
+        for path, annotations in _non_empty(
             _iter_annotation_series(nwbfile), lambda a: len(a.data)
         )
     )
     return events
 
 
-def build_sources_from_nwb(nwbfile: NWBFile) -> NwbSources:
+def build_sources_from_nwb(
+    nwbfile: NWBFile, *, include_identifier: bool = False
+) -> NwbSources:
     """Discover the channels and recording metadata to write from an NWB file.
 
     Every ElectricalSeries in the file's acquisition contributes one continuous
@@ -584,30 +638,47 @@ def build_sources_from_nwb(nwbfile: NWBFile) -> NwbSources:
     epochs, trials, and invalid times tables, the other interval tables by
     name, EventsTable tables by name, and acquisition AnnotationSeries in
     insertion order. A table's timeseries references resolve to the ids of the
-    channels of that series. recording is the identity recording_meta reads.
-    Raises ValueError if a non-empty Units table is present and no
-    ElectricalSeries supplies the rate, if a series is sampled by timestamps
-    rather than a rate, or if two sources share an id.
+    channels of that series. Each source's provenance names the path of its
+    series or table in the file. Every source counts its times from the
+    file's timestamps_reference_time. recording is the identity recording_meta
+    reads, and include_identifier passes to it. Raises ValueError if a
+    non-empty Units table is present and no ElectricalSeries supplies the
+    rate, if a series is sampled by timestamps rather than a rate, or if two
+    sources share an id.
     """
-    session_start = nwbfile.session_start_time
+    reference_time = nwbfile.timestamps_reference_time
     series = [
         acq
         for acq in nwbfile.acquisition.values()
         if isinstance(acq, ElectricalSeries)
     ]
     continuous: list[ContinuousSource] = [
-        NwbContinuousSource(es, channel_index, session_start)
+        NwbContinuousSource(
+            es,
+            channel_index,
+            reference_time,
+            nwb_path=f"/acquisition/{es.name}",
+        )
         for es in series
         for channel_index in range(_channel_count(es))
     ]
     continuous.extend(
-        NwbTimeSeriesSource(plain, channel_index, session_start)
+        NwbTimeSeriesSource(
+            plain,
+            channel_index,
+            reference_time,
+            nwb_path=f"/acquisition/{plain.name}",
+        )
         for plain in _iter_plain_series(nwbfile)
         for channel_index in range(_channel_count(plain))
     )
     events = _build_events(nwbfile, series, continuous)
     _require_unique_ids([*continuous, *events])
-    return NwbSources(continuous, events, recording_meta(nwbfile))
+    return NwbSources(
+        continuous,
+        events,
+        recording_meta(nwbfile, include_identifier=include_identifier),
+    )
 
 
 _SUBJECT_FIELDS: Final = (
@@ -620,15 +691,87 @@ _SUBJECT_FIELDS: Final = (
 """NWB Subject fields carried into recording.json, with their keys there."""
 
 
-def recording_meta(nwbfile: NWBFile) -> RecordingMeta:
+def _nwb_format(nwbfile: NWBFile) -> str:
+    """Return "NWB" followed by the schema version of the file it was read from.
+
+    A file that was not read from disk, or that records no version, gives
+    "NWB" alone.
+    """
+    io = nwbfile.get_read_io()
+    schema_version = None if io is None else io.nwb_version[0]
+    return "NWB" if schema_version is None else f"NWB {schema_version}"
+
+
+def _generated_by(nwbfile: NWBFile) -> list[str]:
+    """Return each "name version" pair of the file's was_generated_by field."""
+    if nwbfile.was_generated_by is None:
+        return []
+    return [
+        " ".join(str(part) for part in entry)
+        for entry in nwbfile.was_generated_by[:]
+    ]
+
+
+def _device_entry(device: Device) -> dict[str, object]:
+    """Return the name, manufacturer, model, and model number of a device.
+
+    The device's model, when it has one, supplies the last three. Each field
+    is left out when it is unset. The serial number and the free-text
+    description are not read.
+    """
+    model = device.model
+    fields = (
+        ("name", device.name),
+        (
+            "manufacturer",
+            device.manufacturer if model is None else model.manufacturer,
+        ),
+        ("model", device.model_name if model is None else model.name),
+        (
+            "model_number",
+            device.model_number if model is None else model.model_number,
+        ),
+    )
+    return {key: str(value) for key, value in fields if value}
+
+
+def _recording_source(
+    nwbfile: NWBFile, *, include_identifier: bool
+) -> dict[str, object]:
+    """Return the source object of recording.json; see recording_meta."""
+    source: dict[str, object] = {
+        "converter": f"timeseries-zarr-nwb {version('timeseries-zarr-nwb')}",
+        "writer": f"timeseries-zarr {writer_version}",
+        "format": _nwb_format(nwbfile),
+    }
+    generated_by = _generated_by(nwbfile)
+    if generated_by:
+        source["generated_by"] = generated_by
+    if nwbfile.devices:
+        source["devices"] = [
+            _device_entry(nwbfile.devices[name])
+            for name in sorted(nwbfile.devices)
+        ]
+    if include_identifier:
+        source["identifier"] = str(nwbfile.identifier)
+    return source
+
+
+def recording_meta(
+    nwbfile: NWBFile, *, include_identifier: bool = False
+) -> RecordingMeta:
     """Return the recording.json content an NWB file supplies.
 
-    start is the session start time. subject carries the id, species, sex,
-    age, description, and date of birth (as ISO 8601) of the file's Subject,
-    and session carries the session id and description, each only when set.
-    source names this converter and the NWB format. Nothing else identifying
-    is read: the experimenter, the institution, and the file identifier stay
-    out of the bundle.
+    session_start_time is the file's session start time. subject carries the
+    id, species, sex, age, description, and date of birth (as ISO 8601) of the
+    file's Subject, and session carries the session id and description, each
+    only when set. source names this converter, the writer, and the NWB format
+    with their versions. It lists the software in the file's was_generated_by
+    field under generated_by and the file's devices in name order under
+    devices, each only when the file holds one. include_identifier adds the
+    file identifier to source. Nothing else identifying is read: the
+    experimenter, the institution, the source script, and the serial numbers of
+    devices stay out of the bundle.
     """
     subject: dict[str, object] = {}
     if nwbfile.subject is not None:
@@ -645,8 +788,10 @@ def recording_meta(nwbfile: NWBFile) -> RecordingMeta:
     if nwbfile.session_description:
         session["description"] = str(nwbfile.session_description)
     return RecordingMeta(
-        start=nwbfile.session_start_time,
+        session_start_time=nwbfile.session_start_time,
         subject=subject,
         session=session,
-        source={"converter": "timeseries-zarr-nwb", "format": "NWB"},
+        source=_recording_source(
+            nwbfile, include_identifier=include_identifier
+        ),
     )

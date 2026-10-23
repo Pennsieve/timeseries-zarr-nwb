@@ -72,7 +72,7 @@ def _source(table, ids=_IDS):
     return NwbIntervalSource(table, STARTED, ids)
 
 
-def test_events_are_session_start_plus_the_start_time_sorted_stably():
+def test_events_are_reference_time_plus_the_start_time_sorted_stably():
     table = _table(
         [
             (2.0, 2.5, ["b"]),
@@ -252,7 +252,7 @@ def test_the_source_is_named_by_its_table_and_has_no_unit():
     assert src.unit is None
 
 
-def test_start_is_the_session_start_or_an_earlier_first_event():
+def test_start_is_the_reference_time_or_an_earlier_first_event():
     later = _source(_epochs([(5.0, 6.0, ["a"], False)]))
     earlier = _source(_epochs([(-3.0, 6.0, ["a"], False)]))
     assert later.start_us() == STARTED_US
@@ -314,6 +314,7 @@ class _FakeTable:
     """A minimal TimeIntervals stand-in with one row and an empty reference."""
 
     name = "fake"
+    neurodata_type = "TimeIntervals"
     colnames = ("start_time", "stop_time", "timeseries")
 
     def __getitem__(self, column):
@@ -337,7 +338,7 @@ def _marks(rows, **kwargs):
     return NwbEventsTableSource(table, STARTED, **kwargs)
 
 
-def test_events_table_times_are_session_start_plus_timestamp_sorted_stably():
+def test_events_table_times_are_reference_time_plus_timestamp_sorted_stably():
     src = _marks(
         [
             {"timestamp": 2.0, "annotation": "b"},
@@ -417,7 +418,7 @@ def test_events_table_is_named_by_its_table_and_has_no_unit():
     assert isinstance(src, EventChannelSource)
 
 
-def test_events_table_start_is_the_session_start_or_an_earlier_first_event():
+def test_events_table_start_is_the_reference_time_or_an_earlier_first_event():
     assert _marks([{"timestamp": 5.0}]).start_us() == STARTED_US
     assert _marks([{"timestamp": -3.0}]).start_us() == STARTED_US - 3_000_000
 
@@ -481,7 +482,7 @@ def test_as_text_decodes_bytes_and_stringifies_the_rest(value, expected):
 
 
 @_DEPRECATED
-def test_annotation_series_events_are_session_start_plus_timestamps_in_order():
+def test_annotation_series_events_are_reference_time_plus_timestamps_in_order():
     series = _annotations(["b", "a", "c"], [2.0, 0.5, 2.0])
     src = NwbAnnotationSeriesSource(series, STARTED)
     assert src.read_events(0, 3).tolist() == [
@@ -522,7 +523,7 @@ def test_annotation_series_is_named_by_its_series_and_serves_the_protocol():
 
 
 @_DEPRECATED
-def test_annotation_series_start_is_the_session_start_or_an_earlier_event():
+def test_annotation_series_start_is_the_reference_time_or_an_earlier_event():
     later = NwbAnnotationSeriesSource(_annotations(["x"], [5.0]), STARTED)
     earlier = NwbAnnotationSeriesSource(_annotations(["x"], [-2.0]), STARTED)
     assert later.start_us() == STARTED_US
@@ -556,6 +557,45 @@ def test_annotation_series_whose_data_and_timestamps_differ_is_rejected():
 
 
 def test_annotation_series_decodes_byte_strings_from_a_file():
-    series = SimpleNamespace(name="bytes", timestamps=[1.0], data=[b"onset"])
+    series = SimpleNamespace(
+        name="bytes",
+        neurodata_type="AnnotationSeries",
+        timestamps=[1.0],
+        data=[b"onset"],
+    )
     src = NwbAnnotationSeriesSource(series, STARTED)
     assert src.read_text(0, 1) == ["onset"]
+
+
+def test_interval_provenance_names_the_type_and_the_path():
+    table = _table([(1.0, 2.0, ["a"])])
+    src = NwbIntervalSource(table, STARTED, _IDS, nwb_path="/intervals/epochs")
+    assert src.provenance() == {
+        "neurodata_type": "TimeIntervals",
+        "nwb_path": "/intervals/epochs",
+    }
+
+
+def test_provenance_without_a_path_names_only_the_type():
+    assert _source(_table([(1.0, 2.0, ["a"])])).provenance() == {
+        "neurodata_type": "TimeIntervals"
+    }
+
+
+def test_events_table_provenance_names_the_type_and_the_path():
+    src = _marks([{"timestamp": 1.0}], nwb_path="/events/marks")
+    assert src.provenance() == {
+        "neurodata_type": "EventsTable",
+        "nwb_path": "/events/marks",
+    }
+
+
+@_DEPRECATED
+def test_annotation_series_provenance_names_the_type_and_the_path():
+    src = NwbAnnotationSeriesSource(
+        _annotations(["x"], [1.0]), STARTED, nwb_path="/acquisition/notes"
+    )
+    assert src.provenance() == {
+        "neurodata_type": "AnnotationSeries",
+        "nwb_path": "/acquisition/notes",
+    }

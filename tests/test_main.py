@@ -1,5 +1,8 @@
+import json
 import sys
+from datetime import UTC, datetime, timedelta
 
+import h5py
 import numpy as np
 import pytest
 from pynwb import NWBHDF5IO
@@ -11,7 +14,9 @@ from timeseries_zarr_nwb.main import main, run
 
 def _write_nwb(path):
     nwb = mock_NWBFile()
-    mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((4096, 2)), rate=1000.0)
+    mock_ElectricalSeries(
+        name="es", nwbfile=nwb, data=np.zeros((4096, 2)), rate=1000.0
+    )
     with NWBHDF5IO(str(path), mode="w") as io:
         io.write(nwb)
     return path
@@ -54,6 +59,60 @@ def test_main_honors_writer_settings_from_the_environment(
     out = tmp_path / "session.zarr"
     assert main([str(nwb), str(out)]) == 0
     assert (out / "0" / "1" / "var" / "zarr.json").exists()
+
+
+def test_main_writes_channel_provenance_and_leaves_the_identifier_out(
+    tmp_path,
+):
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    channel = json.loads((out / "0" / "zarr.json").read_text())
+    provenance = channel["attributes"]["tsz"]["provenance"]
+    assert provenance["nwb_path"] == "/acquisition/es"
+    with h5py.File(nwb, "r") as file:
+        assert provenance["nwb_path"] in file
+    recording = json.loads((out / "recording.json").read_text())
+    assert recording["source"]["format"].startswith("NWB 2.")
+    assert "identifier" not in recording["source"]
+
+
+def test_main_places_data_from_the_reference_time_and_keeps_the_session_start(
+    tmp_path,
+):
+    started = datetime(2021, 6, 1, 12, 0, tzinfo=UTC)
+    nwb = mock_NWBFile(
+        session_start_time=started,
+        timestamps_reference_time=started - timedelta(seconds=30),
+    )
+    mock_ElectricalSeries(
+        name="es", nwbfile=nwb, data=np.zeros((4096, 2)), rate=1000.0
+    )
+    path = tmp_path / "session.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    out = tmp_path / "session.zarr"
+    assert main([str(path), str(out)]) == 0
+    recording = json.loads((out / "recording.json").read_text())
+    assert recording["reference_time"] == "2021-06-01T11:59:30.000000+00:00"
+    assert (
+        recording["session"]["start_time"] == "2021-06-01T12:00:00.000000+00:00"
+    )
+    channel = json.loads((out / "0" / "zarr.json").read_text())
+    assert channel["attributes"]["tsz"]["offset_us"] == 0
+
+
+def test_main_writes_the_identifier_when_the_environment_asks(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ZARR_WRITER_INCLUDE_IDENTIFIER", "1")
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    with NWBHDF5IO(str(nwb), mode="r") as io:
+        identifier = io.read().identifier
+    recording = json.loads((out / "recording.json").read_text())
+    assert recording["source"]["identifier"] == identifier
 
 
 @pytest.mark.parametrize("argv", [[], ["only.nwb"], ["a.nwb", "b", "c"]])

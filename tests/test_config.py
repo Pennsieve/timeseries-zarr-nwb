@@ -131,3 +131,19 @@ def test_var_follows_a_zero_or_one_flag(value, expected):
 def test_var_rejects_any_value_but_zero_or_one(value):
     with pytest.raises(ValueError, match="ZARR_WRITER_VAR must be 0 or 1"):
         load_config({"ZARR_WRITER_VAR": value}, ["in.nwb", "out_bundle"])
+
+
+def test_include_identifier_is_off_by_default():
+    assert load_config({}, ARGV).include_identifier is False
+
+
+def test_include_identifier_follows_its_flag():
+    env = {"ZARR_WRITER_INCLUDE_IDENTIFIER": "1"}
+    assert load_config(env, ARGV).include_identifier is True
+
+
+def test_rejects_an_include_identifier_value_other_than_0_or_1():
+    with pytest.raises(
+        ValueError, match="ZARR_WRITER_INCLUDE_IDENTIFIER must be 0 or 1"
+    ):
+        load_config({"ZARR_WRITER_INCLUDE_IDENTIFIER": "yes"}, ARGV)
