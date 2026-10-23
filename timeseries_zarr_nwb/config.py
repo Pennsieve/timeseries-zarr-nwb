@@ -13,6 +13,9 @@ MAX_ZSTD_LEVEL: Final = 22
 DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
 """Default bytes of raw shards held while one group of channels is read."""
 
+RAW_SAMPLE_BYTES: Final = 4
+"""Bytes of one raw sample, which a bundle stores as float32."""
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -30,9 +33,20 @@ class Config:
     sweep_bytes: int = DEFAULT_SWEEP_BYTES
 
     @property
+    def raw_shard_bytes(self) -> int:
+        """The most bytes one raw shard of a channel holds under opts.
+
+        A shard holds the whole inner chunks that fit in target_shard_bytes,
+        and at least one.
+        """
+        chunk_bytes = self.opts.inner_len * RAW_SAMPLE_BYTES
+        chunks = max(1, self.opts.target_shard_bytes // chunk_bytes)
+        return chunks * chunk_bytes
+
+    @property
     def sweep_channels(self) -> int:
         """The most channels whose raw shards fit in sweep_bytes, at least 1."""
-        return max(1, self.sweep_bytes // self.opts.target_shard_bytes)
+        return max(1, self.sweep_bytes // self.raw_shard_bytes)
 
 
 def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
