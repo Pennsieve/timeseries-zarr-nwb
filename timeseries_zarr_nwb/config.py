@@ -5,16 +5,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from timeseries_zarr import MAX_LEVELS, WriteOpts
+from timeseries_zarr import MAX_LEVELS, WriteOpts, channel_writer_bytes
+
+from timeseries_zarr_nwb.nwb_reader import WINDOW_BYTES
 
 MAX_ZSTD_LEVEL: Final = 22
 """Highest Zstd compression level the codec accepts."""
 
 DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
-"""Default bytes of raw shards held while one group of channels is read."""
+"""Default bytes of memory for the writers and windows of one group of channels."""
 
-RAW_SAMPLE_BYTES: Final = 4
-"""Bytes of one raw sample, which a bundle stores as float32."""
+WINDOW_RESERVE_BYTES: Final = 2 * WINDOW_BYTES
+"""Bytes the sweep reserves for the two windows that the writer holds at once."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +24,8 @@ class Config:
     """Everything one bundle run needs, resolved from env and argv.
 
     include_identifier adds the NWB file identifier to recording.json.
-    sweep_bytes bounds the raw shards held while one group of channels of a
-    series is read.
+    sweep_bytes bounds the memory of the channel writers and the two windows
+    while one group of channels of a series is written.
     """
 
     nwb_path: Path
@@ -33,20 +35,14 @@ class Config:
     sweep_bytes: int = DEFAULT_SWEEP_BYTES
 
     @property
-    def raw_shard_bytes(self) -> int:
-        """The most bytes one raw shard of a channel holds under opts.
-
-        A shard holds the whole inner chunks that fit in target_shard_bytes,
-        and at least one.
-        """
-        chunk_bytes = self.opts.inner_len * RAW_SAMPLE_BYTES
-        chunks = max(1, self.opts.target_shard_bytes // chunk_bytes)
-        return chunks * chunk_bytes
-
-    @property
     def sweep_channels(self) -> int:
-        """The most channels whose raw shards fit in sweep_bytes, at least 1."""
-        return max(1, self.sweep_bytes // self.raw_shard_bytes)
+        """The most channels whose writers fit in sweep_bytes, at least 1.
+
+        The budget is sweep_bytes less WINDOW_RESERVE_BYTES. Each channel
+        costs channel_writer_bytes under opts.
+        """
+        budget = self.sweep_bytes - WINDOW_RESERVE_BYTES
+        return max(1, budget // channel_writer_bytes(self.opts))
 
 
 def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
