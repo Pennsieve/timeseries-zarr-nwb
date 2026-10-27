@@ -155,6 +155,21 @@ def test_rejects_an_include_identifier_value_other_than_0_or_1():
         load_config({"ZARR_WRITER_INCLUDE_IDENTIFIER": "yes"}, ARGV)
 
 
+def test_max_workers_defaults_to_the_library_default():
+    assert load_config({}, ARGV).opts.max_workers is None
+
+
+def test_max_workers_follows_its_variable():
+    cfg = load_config({"ZARR_WRITER_MAX_WORKERS": "4"}, ARGV)
+    assert cfg.opts.max_workers == 4
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "two", "", "1.5"])
+def test_max_workers_rejects_a_value_that_is_not_a_positive_integer(value):
+    with pytest.raises(ValueError, match="ZARR_WRITER_MAX_WORKERS"):
+        load_config({"ZARR_WRITER_MAX_WORKERS": value}, ARGV)
+
+
 def test_sweep_bytes_defaults_to_the_default_sweep_budget():
     assert load_config({}, ARGV).sweep_bytes == DEFAULT_SWEEP_BYTES
 

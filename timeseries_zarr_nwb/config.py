@@ -54,8 +54,9 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
     ZARR_WRITER_MAX_LEVELS takes 0 through MAX_LEVELS, and 0 writes raw
     samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
-    ZARR_WRITER_TARGET_SHARD_BYTES, and ZARR_WRITER_SWEEP_BYTES take 1 or
-    more, and ZARR_WRITER_SWEEP_BYTES defaults to DEFAULT_SWEEP_BYTES.
+    ZARR_WRITER_TARGET_SHARD_BYTES, ZARR_WRITER_SWEEP_BYTES, and
+    ZARR_WRITER_MAX_WORKERS take 1 or more. ZARR_WRITER_SWEEP_BYTES defaults
+    to DEFAULT_SWEEP_BYTES, and ZARR_WRITER_MAX_WORKERS to the CPUs available.
     ZARR_WRITER_VAR and ZARR_WRITER_INCLUDE_IDENTIFIER take 0 or 1, and
     ZARR_WRITER_INCLUDE_IDENTIFIER defaults to 0. Raises ValueError if argv
     does not hold exactly two entries or if a setting lies outside its range.
@@ -63,6 +64,11 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     nwb_path, output_path = _resolve_paths(argv)
 
     defaults = WriteOpts()
+    max_workers = (
+        _int_env(env, "ZARR_WRITER_MAX_WORKERS", 1, 1)
+        if "ZARR_WRITER_MAX_WORKERS" in env
+        else defaults.max_workers
+    )
     opts = WriteOpts(
         zstd_level=_int_env(
             env,
@@ -83,6 +89,7 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
             1,
         ),
         write_var=_flag_env(env, "ZARR_WRITER_VAR", defaults.write_var),
+        max_workers=max_workers,
     )
 
     return Config(
