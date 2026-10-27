@@ -1087,10 +1087,10 @@ _SAMPLES = np.random.default_rng(0).integers(-3000, 3000, (1000, 5))
 
 
 def _window_blocks(source):
-    """Return each channel's window blocks of a series source, concatenated."""
+    """Return each channel's column of the windows of a series source, joined."""
     windows = list(source.iter_windows())
     return [
-        np.concatenate([window[index] for window in windows])
+        np.concatenate([window[:, index] for window in windows])
         for index in range(len(source.channels()))
     ]
 
@@ -1225,7 +1225,7 @@ def test_series_source_windows_are_whole_chunks_of_a_chunked_dataset(
     with NWBHDF5IO(str(path), mode="r") as io:
         es_source = build_sources_from_nwb(io.read()).continuous[0]
         assert es_source._series.data.chunks == (64, 5)
-        lengths = [len(window[0]) for window in es_source.iter_windows()]
+        lengths = [len(window) for window in es_source.iter_windows()]
         _assert_windows_match_read_samples(es_source)
     assert lengths[:-1] == [64] * (len(lengths) - 1)
     assert sum(lengths) == 1000
@@ -1238,7 +1238,7 @@ def test_series_source_window_keeps_the_budget_below_one_chunk(
     path = _write_chunked_nwb(tmp_path / "chunked.nwb")
     with NWBHDF5IO(str(path), mode="r") as io:
         es_source = build_sources_from_nwb(io.read()).continuous[0]
-        lengths = {len(window[0]) for window in es_source.iter_windows()}
+        lengths = {len(window) for window in es_source.iter_windows()}
         _assert_windows_match_read_samples(es_source)
     assert lengths == {40}
 
@@ -1253,6 +1253,19 @@ def test_series_source_windows_match_a_rank_one_electrical_series(
     (source,) = build_sources_from_nwb(nwb).continuous
     assert len(list(source.iter_windows())) > 1
     _assert_windows_match_read_samples(source)
+
+
+@pytest.mark.parametrize("columns", [1, 3])
+def test_series_source_yields_each_window_as_rows_by_channels(columns):
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(
+        nwbfile=nwb, data=_SAMPLES[:, :columns].astype(np.int16), rate=512.0
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    (window,) = source.iter_windows()
+    assert window.shape == (1000, columns)
+    assert window.dtype == np.float32
+    assert window.flags.c_contiguous
 
 
 def test_series_source_without_samples_yields_no_windows(tmp_path):
