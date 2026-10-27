@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from timeseries_zarr import MAX_LEVELS, WriteOpts, channel_writer_bytes
+from timeseries_zarr import (
+    MAX_LEVELS,
+    WINDOW_BATCH_BYTES,
+    WriteOpts,
+    channel_writer_bytes,
+)
 
 from timeseries_zarr_nwb.nwb_reader import WINDOW_BYTES
 
@@ -15,8 +20,8 @@ MAX_ZSTD_LEVEL: Final = 22
 DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
 """Default bytes of memory for the writers and windows of one group of channels."""
 
-WINDOW_RESERVE_BYTES: Final = 2 * WINDOW_BYTES
-"""Bytes the sweep reserves for the two windows that the writer holds at once."""
+WINDOW_RESERVE_BYTES: Final = 2 * (WINDOW_BATCH_BYTES + WINDOW_BYTES)
+"""Bytes the sweep reserves for the two batches of windows that the writer holds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +29,7 @@ class Config:
     """Everything one bundle run needs, resolved from env and argv.
 
     include_identifier adds the NWB file identifier to recording.json.
-    sweep_bytes bounds the memory of the channel writers and the two windows
+    sweep_bytes bounds the memory of the channel writers and the two batches
     while one group of channels of a series is written.
     """
 

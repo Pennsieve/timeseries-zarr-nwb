@@ -61,11 +61,11 @@ setting is optional.
 | `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
 | `ZARR_WRITER_INCLUDE_IDENTIFIER` | add the NWB file identifier to `recording.json` | 0 or 1 | 0 |
 | `ZARR_WRITER_MAX_WORKERS` | threads that fold and encode the channels of a window | 1 or more | available CPUs |
-| `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the channel writers and two windows while one series is read | 1 or more | 2 GiB |
+| `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the channel writers and their windows while one series is read | 1 or more | 2 GiB |
 
 The converter reads each series once per group of channels whose writers fit in
-`ZARR_WRITER_SWEEP_BYTES`, after it reserves 128 MiB for two windows. Each channel writer
-holds up to 5.8 MiB at the defaults, so a group holds 331 channels and a series of that
+`ZARR_WRITER_SWEEP_BYTES`, after it reserves 256 MiB for the windows. Each channel writer
+holds up to 5.8 MiB at the defaults, so a group holds 309 channels and a series of that
 width or less is read once.
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
