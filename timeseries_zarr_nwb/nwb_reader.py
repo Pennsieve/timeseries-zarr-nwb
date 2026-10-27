@@ -321,7 +321,8 @@ class NwbSeriesSource:
     """Consecutive columns of one NWB series, read together window by window.
 
     Each window reads every column of the range in one access to the data.
-    The blocks of a channel hold the same values as its read_samples.
+    The column of a channel in the windows holds the same values as its
+    read_samples.
     """
 
     def __init__(
@@ -345,10 +346,11 @@ class NwbSeriesSource:
         """Return the channel source of each column, in column order."""
         return list(self._channels)
 
-    def iter_windows(self) -> Iterator[list[npt.NDArray[np.float32]]]:
-        """Yield each window of rows as one float32 block per channel.
+    def iter_windows(self) -> Iterator[npt.NDArray[np.float32]]:
+        """Yield each window as a float32 array of (rows, channels).
 
-        A series with no samples yields no windows.
+        The array has one column for each channel, in column order. A series
+        with no samples yields no windows.
         """
         data = self._series.data
         total = int(data.shape[0])
@@ -367,7 +369,7 @@ class NwbSeriesSource:
                 self._columns,
                 self._uv_factor,
             )
-            yield [scaled] if scaled.ndim == 1 else list(scaled.T)
+            yield scaled.reshape(scaled.shape[0], len(self._columns))
 
 
 def _series_sources(
