@@ -65,7 +65,7 @@ setting is optional.
 
 The converter reads each series once per group of channels whose writers fit in
 `ZARR_WRITER_SWEEP_BYTES`, after it reserves 128 MiB for two windows. Each channel writer
-holds up to 4.8 MiB at the defaults, so a group holds 401 channels and a series of that
+holds up to 5.8 MiB at the defaults, so a group holds 331 channels and a series of that
 width or less is read once.
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
