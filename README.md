@@ -60,6 +60,7 @@ setting is optional.
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
 | `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
 | `ZARR_WRITER_INCLUDE_IDENTIFIER` | add the NWB file identifier to `recording.json` | 0 or 1 | 0 |
+| `ZARR_WRITER_MAX_WORKERS` | threads that fold and encode the channels of a window | 1 or more | available CPUs |
 | `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the channel writers and two windows while one series is read | 1 or more | 2 GiB |
 
 The converter reads each series once per group of channels whose writers fit in
