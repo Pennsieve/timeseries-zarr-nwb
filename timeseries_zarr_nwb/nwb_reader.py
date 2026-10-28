@@ -1,6 +1,7 @@
 """Concrete NWB adapters implementing the channel-source protocols."""
 
 import logging
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime
 from importlib.metadata import version
@@ -24,6 +25,7 @@ from timeseries_zarr_nwb.nwb_events import (
     NwbIntervalSource,
     container_provenance,
 )
+from timeseries_zarr_nwb.nwb_layout import Layout, series_layout, stitch
 
 logger = logging.getLogger(__name__)
 
@@ -34,19 +36,14 @@ WINDOW_BYTES: Final = 64 * 2**20
 """Most bytes of float64 samples one window of a series source holds."""
 
 
-def _require_rate(series: TimeSeries) -> float:
-    """Return the series' sample rate in hertz, raising for a timestamps-only series."""
-    if series.rate is None:
-        raise ValueError(
-            f"irregular sampling is not supported: {series.name} has "
-            "timestamps and no rate"
-        )
-    return float(series.rate)
+def _layout(series: TimeSeries) -> Layout:
+    """Return the layout of one series, reading timestamps in windows."""
+    return series_layout(series, WINDOW_BYTES // np.dtype(np.float64).itemsize)
 
 
-def _start_us(series: TimeSeries, reference_time: datetime) -> int:
+def _start_us(layout: Layout, reference_time: datetime) -> int:
     """Return wall-clock microseconds of sample 0, rounded to whole microseconds."""
-    start_s: float = reference_time.timestamp() + float(series.starting_time)
+    start_s = reference_time.timestamp() + layout.start_s
     return round(start_s * MICROSECONDS_PER_SECOND)
 
 
@@ -100,6 +97,33 @@ def _scale(
     return scaled.astype(np.float32)
 
 
+def _read_samples(
+    layout: Layout, channel_index: int, start: int, stop: int
+) -> npt.NDArray[np.float32]:
+    """Return one channel's [start, stop) grid samples as float32, NaN in gaps.
+
+    Each run is scaled by its own series. A range that ends past the last
+    sample is cut at the last sample.
+    """
+    stop = min(stop, layout.num_samples)
+    samples = np.full(max(stop - start, 0), np.nan, dtype=np.float32)
+    columns = range(channel_index, channel_index + 1)
+    first = bisect_right(layout.runs, start, key=lambda run: run.first_sample)
+    for run in layout.runs[max(first - 1, 0) :]:
+        if run.first_sample >= stop:
+            break
+        low = max(start, run.first_sample)
+        high = min(stop, run.first_sample + run.rows)
+        if low >= high:
+            continue
+        row = run.first_row + low - run.first_sample
+        column = _read_column(run.series, channel_index, row, row + high - low)
+        samples[low - start : high - start] = _scale(
+            run.series, column, columns, _uv_factor(run.series)
+        )
+    return samples
+
+
 def _channel_count(series: TimeSeries) -> int:
     """Return the number of channels a rank-1 or rank-2 series holds."""
     shape = series.data.shape
@@ -116,31 +140,32 @@ class NwbContinuousSource:
         reference_time: datetime,
         *,
         nwb_path: str | None = None,
+        layout: Layout | None = None,
     ) -> None:
         """Bind one channel of an ElectricalSeries as a continuous source.
 
         channel_index selects the column this source exposes; a rank-1 series
         holds one channel at index 0. reference_time is the wall-clock instant
         the series' times count from. nwb_path is the series' path in the
-        file, for the provenance. Raises ValueError for a series sampled by
-        timestamps rather than a rate, or for a unit outside the volts
-        family.
+        file, for the provenance. layout places the rows of the series, and
+        of the later segments of a stitched recording, on the channel's grid.
+        None lays out the series alone. Raises ValueError for a unit outside
+        the volts family, or for timestamps series_layout rejects.
         """
-        uv_factor = _uv_factor(electrical_series)
-        if uv_factor is None:
-            unit = str(electrical_series.unit).lower()
-            raise ValueError(f"unsupported ElectricalSeries unit: {unit!r}")
-        self._uv_factor = uv_factor
+        self._layout = _layout(electrical_series) if layout is None else layout
+        for segment in self._layout.series:
+            if _uv_factor(segment) is None:
+                unit = str(segment.unit).lower()
+                raise ValueError(f"unsupported ElectricalSeries unit: {unit!r}")
         self._series = electrical_series
         self._channel_index = channel_index
         self._reference_time = reference_time
         self._nwb_path = nwb_path
-        self._rate_hz = _require_rate(electrical_series)
 
     @property
-    def series_name(self) -> str:
-        """The name of the ElectricalSeries this channel is a column of."""
-        return str(self._series.name)
+    def series_names(self) -> list[str]:
+        """The names of the ElectricalSeries this channel reads, in time order."""
+        return [str(segment.name) for segment in self._layout.series]
 
     @property
     def id(self) -> str:
@@ -170,9 +195,12 @@ class NwbContinuousSource:
 
         filtering is the series' description of the filters applied to it.
         device is the name of the device of the electrode's group. Each one is
-        left out when the file does not record it.
+        left out when the file does not record it. A channel stitched from
+        several series adds segments, their names in time order.
         """
         provenance = container_provenance(self._series, self._nwb_path)
+        if len(self._layout.series) > 1:
+            provenance["segments"] = self.series_names
         if self._series.filtering:
             provenance["filtering"] = str(self._series.filtering)
         electrodes = self._series.electrodes
@@ -184,31 +212,29 @@ class NwbContinuousSource:
         return provenance
 
     def rate_hz(self) -> float:
-        """Return the ElectricalSeries' sample rate in hertz."""
-        return self._rate_hz
+        """Return the sample rate of the channel's grid in hertz."""
+        return self._layout.rate_hz
 
     def start_us(self) -> int:
         """Return the wall-clock microseconds of sample index 0.
 
-        The reference time plus the series' own start offset, rounded to whole
-        microseconds.
+        The reference time plus the start of the earliest segment, rounded to
+        whole microseconds.
         """
-        return _start_us(self._series, self._reference_time)
+        return _start_us(self._layout, self._reference_time)
 
     def num_samples(self) -> int:
-        """Return the length of the series' time axis, shared by every channel."""
-        return int(self._series.data.shape[0])
+        """Return the grid samples of the channel, gaps included."""
+        return self._layout.num_samples
 
     def read_samples(self, start: int, stop: int) -> npt.NDArray[np.float32]:
         """Return the half-open [start, stop) sample window as float32 microvolts.
 
-        Applies the series' affine scaling, then converts from the series' own
-        unit to microvolts. An empty range (stop <= start) yields a length-0
-        array.
+        Applies each series' affine scaling, then converts from the series'
+        own unit to microvolts. A sample in a gap is NaN. An empty range
+        (stop <= start) yields a length-0 array.
         """
-        column = _read_column(self._series, self._channel_index, start, stop)
-        columns = range(self._channel_index, self._channel_index + 1)
-        return _scale(self._series, column, columns, self._uv_factor)
+        return _read_samples(self._layout, self._channel_index, start, stop)
 
 
 class NwbTimeSeriesSource:
@@ -227,13 +253,15 @@ class NwbTimeSeriesSource:
         reference_time: datetime,
         *,
         nwb_path: str | None = None,
+        layout: Layout | None = None,
     ) -> None:
         """Bind one channel of a TimeSeries as a continuous source.
 
         channel_index selects the column of a rank-2 series and is 0 for a
         rank-1 series. nwb_path is the series' path in the file, for the
-        provenance. Raises ValueError for a series sampled by timestamps
-        rather than a rate, or whose data has a rank above 2.
+        provenance. layout places the rows of the series on the channel's
+        grid, and None lays them out here. Raises ValueError for data with a
+        rank above 2, or for timestamps series_layout rejects.
         """
         rank = len(series.data.shape)
         if rank > MAX_SERIES_RANK:
@@ -245,14 +273,13 @@ class NwbTimeSeriesSource:
         self._channel_index = channel_index
         self._reference_time = reference_time
         self._nwb_path = nwb_path
-        self._rate_hz = _require_rate(series)
-        self._uv_factor = _uv_factor(series)
-        self._unit = str(series.unit) if self._uv_factor is None else "uV"
+        self._layout = _layout(series) if layout is None else layout
+        self._unit = str(series.unit) if _uv_factor(series) is None else "uV"
 
     @property
-    def series_name(self) -> str:
-        """The name of the TimeSeries this channel is a column of."""
-        return str(self._series.name)
+    def series_names(self) -> list[str]:
+        """The name of the TimeSeries this channel is a column of, in a list."""
+        return [str(segment.name) for segment in self._layout.series]
 
     @property
     def id(self) -> str:
@@ -276,27 +303,25 @@ class NwbTimeSeriesSource:
         return container_provenance(self._series, self._nwb_path)
 
     def rate_hz(self) -> float:
-        """Return the series' sample rate in hertz."""
-        return self._rate_hz
+        """Return the sample rate of the channel's grid in hertz."""
+        return self._layout.rate_hz
 
     def start_us(self) -> int:
         """Return the wall-clock microseconds of sample index 0."""
-        return _start_us(self._series, self._reference_time)
+        return _start_us(self._layout, self._reference_time)
 
     def num_samples(self) -> int:
-        """Return the length of the series' time axis, shared by every channel."""
-        return int(self._series.data.shape[0])
+        """Return the grid samples of the channel, gaps included."""
+        return self._layout.num_samples
 
     def read_samples(self, start: int, stop: int) -> npt.NDArray[np.float32]:
         """Return the [start, stop) sample window as float32 in the channel unit.
 
         Applies the series' conversion and offset, then the volts-to-microvolts
-        factor when the unit is in the volts family. An empty range
-        (stop <= start) yields a length-0 array.
+        factor when the unit is in the volts family. A sample in a gap is NaN.
+        An empty range (stop <= start) yields a length-0 array.
         """
-        column = _read_column(self._series, self._channel_index, start, stop)
-        columns = range(self._channel_index, self._channel_index + 1)
-        return _scale(self._series, column, columns, self._uv_factor)
+        return _read_samples(self._layout, self._channel_index, start, stop)
 
 
 type ContinuousSource = NwbContinuousSource | NwbTimeSeriesSource
@@ -318,29 +343,29 @@ def _window_rows(series: TimeSeries, channel_count: int) -> int:
 
 
 class NwbSeriesSource:
-    """Consecutive columns of one NWB series, read together window by window.
+    """Consecutive columns of a laid-out series, read together window by window.
 
-    Each window reads every column of the range in one access to the data.
-    The column of a channel in the windows holds the same values as its
-    read_samples.
+    The layout holds one series, or the segments of a stitched recording,
+    which share their columns. Each window reads every column of the range
+    in one access to the data. The column of a channel in the windows holds
+    the same values as its read_samples.
     """
 
     def __init__(
         self,
-        series: TimeSeries,
+        layout: Layout,
         columns: range,
         channels: Sequence[ContinuousSource],
     ) -> None:
-        """Bind a range of columns of a series and the channels they back.
+        """Bind a range of columns of a layout and the channels they back.
 
         columns is a contiguous, ascending range of column indexes, and is
         range(0, 1) for a rank-1 series. channels holds the channel source of
         each column of columns, in column order.
         """
-        self._series = series
+        self._layout = layout
         self._columns = columns
         self._channels = list(channels)
-        self._uv_factor = _uv_factor(series)
 
     def channels(self) -> Sequence[ContinuousSource]:
         """Return the channel source of each column, in column order."""
@@ -349,14 +374,33 @@ class NwbSeriesSource:
     def iter_windows(self) -> Iterator[npt.NDArray[np.float32]]:
         """Yield each window as a float32 array of (rows, channels).
 
-        The array has one column for each channel, in column order. A series
-        with no samples yields no windows.
+        The array has one column for each channel, in column order. A gap
+        between runs yields windows of NaN. A layout with no samples yields no
+        windows.
         """
-        data = self._series.data
-        total = int(data.shape[0])
-        step = _window_rows(self._series, len(self._columns))
-        for start in range(0, total, step):
-            stop = min(start + step, total)
+        width = len(self._columns)
+        end = 0
+        for run in self._layout.runs:
+            step = _window_rows(run.series, width)
+            gap = run.first_sample - end
+            if gap:
+                nan = np.full((min(gap, step), width), np.nan, dtype=np.float32)
+                for start in range(0, gap, step):
+                    yield nan[: min(step, gap - start)]
+            yield from self._run_windows(
+                run.series, run.first_row, run.rows, step
+            )
+            end = run.first_sample + run.rows
+
+    def _run_windows(
+        self, series: TimeSeries, first_row: int, rows: int, step: int
+    ) -> Iterator[npt.NDArray[np.float32]]:
+        """Yield the windows of rows of a series, cut at multiples of step."""
+        data = series.data
+        uv_factor = _uv_factor(series)
+        start, stop_row = first_row, first_row + rows
+        while start < stop_row:
+            stop = min((start // step + 1) * step, stop_row)
             if len(data.shape) == 1:
                 window = data[start:stop]
             else:
@@ -364,20 +408,21 @@ class NwbSeriesSource:
                     start:stop, self._columns.start : self._columns.stop
                 ]
             scaled = _scale(
-                self._series,
+                series,
                 np.asarray(window, dtype=np.float64),
                 self._columns,
-                self._uv_factor,
+                uv_factor,
             )
             yield scaled.reshape(scaled.shape[0], len(self._columns))
+            start = stop
 
 
 def _series_sources(
-    series: TimeSeries,
+    layout: Layout,
     channels: Sequence[ContinuousSource],
     max_channels: int | None,
 ) -> Iterator[NwbSeriesSource]:
-    """Yield one series source per group of consecutive columns of a series.
+    """Yield one series source per group of consecutive columns of a layout.
 
     channels holds the source of every column in column order. Each group
     holds at most max_channels columns, and None puts every column in one
@@ -388,7 +433,7 @@ def _series_sources(
     size = len(channels) if max_channels is None else max_channels
     for start in range(0, len(channels), size):
         stop = min(start + size, len(channels))
-        yield NwbSeriesSource(series, range(start, stop), channels[start:stop])
+        yield NwbSeriesSource(layout, range(start, stop), channels[start:stop])
 
 
 class NwbUnitSource:
@@ -691,24 +736,27 @@ def _non_empty[T](
 
 def _build_events(
     nwbfile: NWBFile,
-    series: list[ElectricalSeries],
+    waveform_rate_hz: float | None,
     continuous: Sequence[ContinuousSource],
 ) -> list[EventSource]:
-    """Build one event source per non-empty table or annotation series."""
+    """Build one event source per non-empty table or annotation series.
+
+    waveform_rate_hz is the rate of the first ElectricalSeries, or None when
+    the file has none.
+    """
     reference_time = nwbfile.timestamps_reference_time
     channel_ids_by_series: dict[str, list[str]] = {}
     for source in continuous:
-        channel_ids_by_series.setdefault(source.series_name, []).append(
-            source.id
-        )
+        for name in source.series_names:
+            channel_ids_by_series.setdefault(name, []).append(source.id)
 
     events: list[EventSource] = []
     for path, units in _non_empty(_iter_units_tables(nwbfile), len):
-        if not series:
+        if waveform_rate_hz is None:
             raise ValueError("unit channels need an ElectricalSeries rate")
         events.append(
             NwbUnitSource(
-                units, float(series[0].rate), reference_time, nwb_path=path
+                units, waveform_rate_hz, reference_time, nwb_path=path
             )
         )
     events.extend(
@@ -730,6 +778,43 @@ def _build_events(
     return events
 
 
+def _electrode_ids(series: ElectricalSeries) -> tuple[str, ...]:
+    """Return the electrode table id of each column of a series, in order."""
+    electrodes = series.electrodes
+    return tuple(str(electrodes.table.id[row]) for row in electrodes.data[:])
+
+
+def _segment_groups(
+    series: Sequence[ElectricalSeries],
+) -> list[list[ElectricalSeries]]:
+    """Return the series grouped into recordings, in order of first member.
+
+    Series with the same electrode ids in the same order are the segments of
+    one recording. A series without electrodes is a group of its own.
+    Raises ValueError if two series share an electrode id but not the whole
+    list of ids.
+    """
+    groups: list[list[ElectricalSeries]] = []
+    group_of: dict[tuple[str, ...], list[ElectricalSeries]] = {}
+    owner: dict[str, tuple[str, ...]] = {}
+    for es in series:
+        ids = _electrode_ids(es)
+        for electrode in ids:
+            key = owner.setdefault(electrode, ids)
+            if key != ids:
+                raise ValueError(
+                    f"{es.name} and {group_of[key][0].name} share electrode id "
+                    f"{electrode!r} but not their electrode list; the segments "
+                    "of one recording list the same electrodes in the same order"
+                )
+        if ids and ids in group_of:
+            group_of[ids].append(es)
+        else:
+            group_of[ids] = [es]
+            groups.append(group_of[ids])
+    return groups
+
+
 def build_sources_from_nwb(
     nwbfile: NWBFile,
     *,
@@ -739,25 +824,32 @@ def build_sources_from_nwb(
     """Discover the channels and recording metadata to write from an NWB file.
 
     Every ElectricalSeries in the file's acquisition contributes one channel
-    per column, in series order then column order. Every other acquisition
-    TimeSeries holding numeric samples of rank 1 or 2 follows, one channel per
-    column in the same order. continuous holds one multi-channel source per
-    group of at most max_sweep_channels consecutive columns of each series, and
-    None puts every column of a series in one group. The grouping leaves the
-    channel order unchanged. Event sources follow, one per non-empty table or
-    series, in this order: Units tables (see _iter_units_tables, waveform rate
-    from the first ElectricalSeries), the epochs, trials, and invalid times
+    per column, in series order then column order. ElectricalSeries with the
+    same electrode ids in the same order are the segments of one recording:
+    they give one channel per electrode at the position of the first of them,
+    with the segments in time order on the grid of the earliest and NaN in
+    the gaps. Every other acquisition TimeSeries holding numeric samples of
+    rank 1 or 2 follows, one channel per column in the same order. A series
+    sampled by timestamps takes its rate from them, with NaN in the gaps
+    between them. continuous holds one multi-channel source per group of at
+    most max_sweep_channels consecutive columns of each recording or series,
+    and None puts every column in one group. The grouping leaves the channel
+    order unchanged. Event sources follow, one per non-empty table or series,
+    in this order: Units tables (see _iter_units_tables, waveform rate from
+    the first ElectricalSeries), the epochs, trials, and invalid times
     tables, the other interval tables by name, EventsTable tables by name, and
     acquisition AnnotationSeries in insertion order. A table's timeseries
-    references resolve to the ids of the channels of that series. Each source's
-    provenance names the path of its series or table in the file. Every source
-    counts its times from the file's timestamps_reference_time, which recording
-    names as the bundle's reference time. recording is the identity
-    recording_meta reads, and include_identifier passes to it. Raises
-    ValueError if a non-empty Units table is present and no ElectricalSeries
-    supplies the rate, if a series is sampled by timestamps rather than a rate,
-    if an ElectricalSeries unit is outside the volts family, if two sources
-    share an id, or if max_sweep_channels is below 1.
+    references resolve to the ids of the channels of that series, or of the
+    recording it is a segment of. Each source's provenance names the path of
+    its series or table in the file. Every source counts its times from the
+    file's timestamps_reference_time, which recording names as the bundle's
+    reference time. recording is the identity recording_meta reads, and
+    include_identifier passes to it. Raises ValueError if a non-empty Units
+    table is present and no ElectricalSeries supplies the rate, if
+    series_layout rejects the timestamps of a series, if stitch rejects the
+    segments of a recording, if two ElectricalSeries share some electrode ids
+    but not all, if an ElectricalSeries unit is outside the volts family, if
+    two sources share an id, or if max_sweep_channels is below 1.
     """
     if max_sweep_channels is not None and max_sweep_channels < 1:
         raise ValueError(
@@ -770,24 +862,36 @@ def build_sources_from_nwb(
         if isinstance(acq, ElectricalSeries)
     ]
     continuous: list[NwbSeriesSource] = []
-    for es in series:
-        path = f"/acquisition/{es.name}"
+    waveform_rate_hz: float | None = None
+    for group in _segment_groups(series):
+        layout = stitch([_layout(es) for es in group])
+        if waveform_rate_hz is None:
+            waveform_rate_hz = layout.rate_hz
+        first = layout.series[0]
+        path = f"/acquisition/{first.name}"
         electrodes = [
-            NwbContinuousSource(es, index, reference_time, nwb_path=path)
-            for index in range(_channel_count(es))
+            NwbContinuousSource(
+                first, index, reference_time, nwb_path=path, layout=layout
+            )
+            for index in range(_channel_count(first))
         ]
-        continuous.extend(_series_sources(es, electrodes, max_sweep_channels))
+        continuous.extend(
+            _series_sources(layout, electrodes, max_sweep_channels)
+        )
     for plain in _iter_plain_series(nwbfile):
         path = f"/acquisition/{plain.name}"
+        layout = _layout(plain)
         columns = [
-            NwbTimeSeriesSource(plain, index, reference_time, nwb_path=path)
+            NwbTimeSeriesSource(
+                plain, index, reference_time, nwb_path=path, layout=layout
+            )
             for index in range(_channel_count(plain))
         ]
-        continuous.extend(_series_sources(plain, columns, max_sweep_channels))
+        continuous.extend(_series_sources(layout, columns, max_sweep_channels))
     channels = [
         channel for source in continuous for channel in source.channels()
     ]
-    events = _build_events(nwbfile, series, channels)
+    events = _build_events(nwbfile, waveform_rate_hz, channels)
     _require_unique_ids([*channels, *events])
     return NwbSources(
         continuous,

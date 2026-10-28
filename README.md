@@ -5,10 +5,11 @@ a static Zarr v3 hierarchy that a browser reads over HTTP range requests to
 render time series interactively across various time spans.
 
 This package is an NWB input adapter for
-[timeseries-zarr](https://github.com/Pennsieve/timeseries-zarr-py), which specifies
-the format and writes the bundle.
+[timeseries-zarr](https://github.com/Pennsieve/timeseries-zarr-py), which
+specifies the format and writes the bundle.
 
-It opens an NWB file with `pynwb`, presents its series and tables as channel sources, and runs the writer.
+It opens an NWB file with `pynwb`, presents its series and tables as channel
+sources, and runs the writer.
 
 ## Installation
 
@@ -22,34 +23,47 @@ pip install git+https://github.com/Pennsieve/timeseries-zarr-nwb.git
 timeseries-zarr-nwb recording.nwb /data/recording.zarr
 ```
 
-`python -m timeseries_zarr_nwb` runs the same command. The exit code is 0 on success,
-2 for a bad invocation, and 1 for a failed conversion.
+`python -m timeseries_zarr_nwb` runs the same command. The exit code is 0 on
+success, 2 for a bad invocation, and 1 for a failed conversion.
 
-The output path must be absent, empty, or hold a bundle from an earlier run, which the
-converter replaces.
+The output path must be absent, empty, or hold a bundle from an earlier run,
+which the converter replaces.
 
-The converter reads every `ElectricalSeries` and every other numeric `TimeSeries` in
-the acquisition as continuous channels, one per column. It reads `Units` tables,
-interval tables (epochs, trials, invalid times, and any other `TimeIntervals`),
-`EventsTable` tables, and `AnnotationSeries` as event channels. Voltage samples are
-stored in microvolts. A series in any other unit keeps its unit.
+The converter reads every `ElectricalSeries` and every other numeric
+`TimeSeries` in the acquisition as continuous channels, one per column. It
+reads `Units` tables, interval tables (epochs, trials, invalid times, and any
+other `TimeIntervals`), `EventsTable` tables, and `AnnotationSeries` as event
+channels. Voltage samples are stored in microvolts. A series in any other unit
+keeps its unit.
 
-The subject, the session, the session start time, and the reference time go into
-`recording.json` at the bundle root and into no other metadata. The reference time is
-the NWB `timestamps_reference_time`, and every time in the bundle counts from it. The
-`source` object of `recording.json` names the converter, the writer, and the NWB schema
-version. It also lists the software in the file's `was_generated_by` field and the name,
-manufacturer, and model of each device. Delete that file to de-identify a bundle. Free
-text in event channels can still hold identity. The NWB file identifier stays out unless
+A series sampled by timestamps takes its rate from them. Most steps between its
+first 4096 timestamps must be one sample period. The converter fills each
+longer step with NaN values. Two or more `ElectricalSeries` that list the same
+electrodes in the same order are the segments of one recording. The converter
+writes one channel per electrode, with the segments in time order on the sample
+grid of the earliest segment and NaN values in the gaps. It rejects a file when
+a timestamp or a segment is more than 1 us off its sample grid, or when two
+segments overlap.
+
+The subject, the session, the session start time, and the reference time go
+into `recording.json` at the bundle root and into no other metadata. The
+reference time is the NWB `timestamps_reference_time`, and every time in the
+bundle counts from it. The `source` object of `recording.json` names the
+converter, the writer, and the NWB schema version. It also lists the software
+in the file's `was_generated_by` field and the name, manufacturer, and model of
+each device. Delete that file to de-identify a bundle. Free text in event
+channels can still hold identity. The NWB file identifier stays out unless
 `ZARR_WRITER_INCLUDE_IDENTIFIER` is 1.
 
-Each channel's `provenance` holds the neurodata type and the path of the NWB object it
-came from, such as `/acquisition/ElectricalSeries`. An `ElectricalSeries` channel also
-carries the series' `filtering` and the name of its electrode's device when the file
-records them.
+Each channel's `provenance` holds the neurodata type and the path of the NWB
+object it came from, such as `/acquisition/ElectricalSeries`. An
+`ElectricalSeries` channel also carries the series' `filtering` and the name of
+its electrode's device when the file records them. A channel stitched from
+segments names its earliest segment in `nwb_path` and lists every segment under
+`segments`, in time order.
 
-Writer settings come from the environment under the `ZARR_WRITER_` prefix. Every
-setting is optional.
+Writer settings come from the environment under the `ZARR_WRITER_` prefix.
+Every setting is optional.
 
 | Variable | Governs | Range | Default |
 |---|---|---|---|
@@ -64,13 +78,26 @@ setting is optional.
 | `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the channel writers and their windows while one series is read | 1 or more | 2 GiB |
 
 The converter reads each series once per group of channels whose writers fit in
-`ZARR_WRITER_SWEEP_BYTES`, after it reserves 256 MiB for the windows. Each channel writer
-holds up to 5.8 MiB at the defaults, so a group holds 309 channels and a series of that
-width or less is read once.
+`ZARR_WRITER_SWEEP_BYTES`, after it reserves 256 MiB for the windows. Each
+channel writer holds up to 5.8 MiB at the defaults, so a group holds 309
+channels and a series of that width or less is read once.
 
-`ZARR_WRITER_VAR` sets the library's `write_var` option.
-[The library README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what
+`ZARR_WRITER_VAR` sets the library's `write_var` option. [The library
+README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what
 it writes and what it costs in memory.
+
+## Known limitations
+
+- The converter reads continuous channels only from `/acquisition` and skips
+  LFP and other series under `/processing`.
+- A file with a `Units` table and no `ElectricalSeries` fails to convert. A
+  `Units` table records no sampling rate, so its waveforms take the rate of the
+  first `ElectricalSeries`. That series is not always the one that was spike
+  sorted.
+- A unit channel does not name its electrodes. The converter does not read the
+  `electrodes` column of a `Units` table.
+- The converter keeps only the `timestamp`, `duration`, and `annotation`
+  columns of an `EventsTable` and drops the others with a warning.
 
 ## Development
 

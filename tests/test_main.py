@@ -5,7 +5,11 @@ from datetime import UTC, datetime, timedelta
 import h5py
 import numpy as np
 import pytest
+import zarr
+from hdmf.common import DynamicTableRegion
 from pynwb import NWBHDF5IO
+from pynwb.ecephys import ElectricalSeries
+from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
 
@@ -129,6 +133,60 @@ def test_main_counts_from_a_reference_time_after_the_session_start(
     )
     channel = json.loads((out / "0" / "zarr.json").read_text())
     assert channel["attributes"]["tsz"]["offset_us"] == 0
+
+
+def _write_segmented_nwb(path):
+    """Write one electrode recorded in two segments, the second with a gap.
+
+    The first segment holds samples 0 to 3 at 1000 Hz from 0.5 s. The second
+    holds samples 10 to 13 and 20 to 21 by timestamps.
+    """
+    nwb = mock_NWBFile()
+    group = nwb.create_electrode_group(
+        name="grp",
+        description="d",
+        location="loc",
+        device=mock_Device(nwbfile=nwb),
+    )
+    nwb.add_electrode(group=group, location="loc")
+    second_samples = np.concatenate([np.arange(10, 14), np.arange(20, 22)])
+    for name, data, timing in (
+        ("first", np.arange(4.0), {"rate": 1000.0, "starting_time": 0.5}),
+        (
+            "second",
+            10 + np.arange(6.0),
+            {"timestamps": 0.5 + second_samples / 1000.0},
+        ),
+    ):
+        region = DynamicTableRegion(
+            name="electrodes", data=[0], description="r", table=nwb.electrodes
+        )
+        nwb.add_acquisition(
+            ElectricalSeries(name=name, data=data, electrodes=region, **timing)
+        )
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    return path
+
+
+def test_main_writes_nan_in_the_gaps_of_a_recording_split_into_segments(
+    tmp_path,
+):
+    nwb = _write_segmented_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    expected = np.full(22, np.nan, dtype=np.float32)
+    expected[0:4] = np.arange(4) * 1e6
+    expected[10:14] = (10 + np.arange(4)) * 1e6
+    expected[20:22] = (14 + np.arange(2)) * 1e6
+    raw = zarr.open_array(out / "0" / "raw", mode="r")[:]
+    assert np.array_equal(raw, expected, equal_nan=True)
+    channel = json.loads((out / "0" / "zarr.json").read_text())
+    assert channel["attributes"]["tsz"]["offset_us"] == 500_000
+    assert channel["attributes"]["tsz"]["rate_hz"] == 1000.0
+    provenance = channel["attributes"]["tsz"]["provenance"]
+    assert provenance["segments"] == ["first", "second"]
+    assert not (out / "1").exists()
 
 
 def test_main_writes_the_identifier_when_the_environment_asks(

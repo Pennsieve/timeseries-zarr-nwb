@@ -517,12 +517,18 @@ def test_continuous_reads_a_rank_one_series_as_one_channel():
     assert len(_channels(continuous)) == 1
 
 
-def test_continuous_rejects_a_series_sampled_by_timestamps():
+def test_continuous_takes_the_rate_and_start_of_a_series_from_its_timestamps():
+    data = np.arange(20, dtype=np.float64).reshape(10, 2)
     es = mock_ElectricalSeries(
-        data=np.zeros((10, 2)), timestamps=np.arange(10) / 512.0
+        data=data, timestamps=2.0 + np.arange(10) / 512.0
     )
-    with pytest.raises(ValueError, match="irregular sampling"):
-        NwbContinuousSource(es, 0, STARTED)
+    src = NwbContinuousSource(es, 1, STARTED)
+    assert src.rate_hz() == pytest.approx(512.0)
+    assert src.start_us() == _STARTED_US + 2_000_000
+    assert src.num_samples() == 10
+    assert np.array_equal(
+        src.read_samples(0, 10), (data[:, 1] * 1e6).astype(np.float32)
+    )
 
 
 def test_timeseries_source_keeps_a_unit_outside_the_volts_family():
@@ -568,15 +574,23 @@ def test_timeseries_source_names_the_columns_of_a_rank_two_series():
     )
 
 
-def test_timeseries_source_rejects_a_series_sampled_by_timestamps():
+def test_timeseries_source_fills_a_gap_between_timestamps_with_nan():
+    stamps = np.concatenate([np.arange(4), 10 + np.arange(3)]) / 512.0
     ts = mock_TimeSeries(
-        name="irregular",
-        data=np.zeros(10),
+        name="gapped",
+        data=np.arange(7, dtype=np.float64),
         unit="%",
-        timestamps=np.arange(10) / 512.0,
+        timestamps=stamps,
     )
-    with pytest.raises(ValueError, match="irregular sampling"):
-        NwbTimeSeriesSource(ts, 0, STARTED)
+    src = NwbTimeSeriesSource(ts, 0, STARTED)
+    assert src.num_samples() == 13
+    expected = np.full(13, np.nan, dtype=np.float32)
+    expected[0:4] = [0, 1, 2, 3]
+    expected[10:13] = [4, 5, 6]
+    assert np.array_equal(src.read_samples(0, 13), expected, equal_nan=True)
+    assert np.array_equal(
+        src.read_samples(2, 11), expected[2:11], equal_nan=True
+    )
 
 
 def test_timeseries_source_rejects_data_above_rank_two():
@@ -648,17 +662,19 @@ def test_build_rejects_two_sources_with_one_id():
         build_sources_from_nwb(nwb)
 
 
-def test_build_reports_a_series_sampled_by_timestamps():
+def test_build_reports_a_timestamp_off_the_sample_grid():
     nwb = mock_NWBFile()
     mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((10, 2)), rate=512.0)
+    stamps = np.arange(10) / 512.0
+    stamps[6:] += 0.4 / 512.0
     mock_TimeSeries(
-        name="irregular",
+        name="misaligned",
         nwbfile=nwb,
         data=np.zeros(10),
         unit="%",
-        timestamps=np.arange(10) / 512.0,
+        timestamps=stamps,
     )
-    with pytest.raises(ValueError, match="irregular sampling.*irregular"):
+    with pytest.raises(ValueError, match="of misaligned is .* off its"):
         build_sources_from_nwb(nwb)
 
 
@@ -1004,8 +1020,8 @@ def test_build_unit_tables_still_need_an_electrical_series_rate():
 def test_continuous_sources_report_the_name_of_their_series():
     nwb, es = _nwb_with_series()
     plain = TimeSeries(name="pulse", data=np.zeros(20), unit="bpm", rate=1.0)
-    assert NwbContinuousSource(es, 1, STARTED).series_name == "es"
-    assert NwbTimeSeriesSource(plain, 0, STARTED).series_name == "pulse"
+    assert NwbContinuousSource(es, 1, STARTED).series_names == ["es"]
+    assert NwbTimeSeriesSource(plain, 0, STARTED).series_names == ["pulse"]
 
 
 def test_electrical_series_provenance_names_the_series_filtering_and_device(
@@ -1102,7 +1118,7 @@ def _assert_windows_match_read_samples(source):
     for channel, block in zip(channels, blocks, strict=True):
         expected = channel.read_samples(0, channel.num_samples())
         assert block.dtype == np.float32
-        assert np.array_equal(block, expected)
+        assert np.array_equal(block, expected, equal_nan=True)
 
 
 @pytest.fixture
@@ -1224,7 +1240,7 @@ def test_series_source_windows_are_whole_chunks_of_a_chunked_dataset(
     path = _write_chunked_nwb(tmp_path / "chunked.nwb")
     with NWBHDF5IO(str(path), mode="r") as io:
         es_source = build_sources_from_nwb(io.read()).continuous[0]
-        assert es_source._series.data.chunks == (64, 5)
+        assert es_source._layout.series[0].data.chunks == (64, 5)
         lengths = [len(window) for window in es_source.iter_windows()]
         _assert_windows_match_read_samples(es_source)
     assert lengths[:-1] == [64] * (len(lengths) - 1)
@@ -1316,3 +1332,171 @@ def test_series_sources_write_the_same_bundle_as_their_channels(
     multi = _bundle_files(tmp_path / "multi")
     assert (tmp_path / "multi" / "6" / "zarr.json").exists()
     assert multi == _bundle_files(tmp_path / "single")
+
+
+def _nwb_with_electrodes(count):
+    """Return a file whose electrode table holds count electrodes of one group."""
+    nwb = mock_NWBFile()
+    device = mock_Device(nwbfile=nwb)
+    group = nwb.create_electrode_group(
+        name="grp", description="d", location="loc", device=device
+    )
+    for _ in range(count):
+        nwb.add_electrode(group=group, location="loc")
+    return nwb
+
+
+def _add_segment(nwb, name, electrodes, **fields):
+    """Add an ElectricalSeries over the given electrode rows to the acquisition."""
+    region = DynamicTableRegion(
+        name="electrodes",
+        data=list(electrodes),
+        description="r",
+        table=nwb.electrodes,
+    )
+    series = ElectricalSeries(name=name, electrodes=region, **fields)
+    nwb.add_acquisition(series)
+    return series
+
+
+def test_build_stitches_series_over_the_same_electrodes_into_one_channel_each():
+    nwb = _nwb_with_electrodes(2)
+    first = np.arange(8, dtype=np.float64).reshape(4, 2)
+    second = 100 + np.arange(6, dtype=np.float64).reshape(3, 2)
+    _add_segment(
+        nwb, "first", [0, 1], data=first, rate=512.0, starting_time=1.0
+    )
+    _add_segment(
+        nwb,
+        "second",
+        [0, 1],
+        data=second,
+        rate=512.0,
+        starting_time=1.0 + 10 / 512.0,
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    channels = source.channels()
+    assert [channel.id for channel in channels] == ["0", "1"]
+    reference_us = round(nwb.timestamps_reference_time.timestamp() * 1_000_000)
+    assert channels[1].start_us() == reference_us + 1_000_000
+    assert channels[1].num_samples() == 13
+    expected = np.full(13, np.nan, dtype=np.float32)
+    expected[0:4] = first[:, 1] * 1e6
+    expected[10:13] = second[:, 1] * 1e6
+    assert np.array_equal(
+        channels[1].read_samples(0, 13), expected, equal_nan=True
+    )
+
+
+def test_build_places_a_recording_at_its_first_series_with_segments_in_time_order():
+    nwb = _nwb_with_electrodes(4)
+    data = np.zeros((4, 2))
+    _add_segment(nwb, "late", [0, 1], data=data, rate=512.0, starting_time=1.0)
+    _add_segment(nwb, "other", [2, 3], data=data, rate=512.0, starting_time=0.0)
+    _add_segment(nwb, "early", [0, 1], data=data, rate=512.0, starting_time=0.0)
+    channels = _channels(build_sources_from_nwb(nwb).continuous)
+    assert [channel.id for channel in channels] == ["0", "1", "2", "3"]
+    assert channels[0].series_names == ["early", "late"]
+    provenance = channels[0].provenance()
+    assert provenance["nwb_path"] == "/acquisition/early"
+    assert provenance["segments"] == ["early", "late"]
+    assert "segments" not in channels[2].provenance()
+
+
+def test_stitched_windows_match_read_samples_across_the_gap(small_windows):
+    nwb = _nwb_with_electrodes(5)
+    _add_segment(
+        nwb,
+        "first",
+        range(5),
+        data=_SAMPLES[:600].astype(np.int16),
+        rate=512.0,
+        starting_time=0.0,
+        conversion=0.195,
+    )
+    _add_segment(
+        nwb,
+        "second",
+        range(5),
+        data=_SAMPLES[600:].astype(np.int16),
+        rate=512.0,
+        starting_time=1100 / 512.0,
+        conversion=0.5,
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    channel = source.channels()[0]
+    assert channel.num_samples() == 1500
+    assert np.isnan(channel.read_samples(600, 1100)).all()
+    assert channel.read_samples(1100, 1101)[0] == np.float32(
+        _SAMPLES[600, 0] * 0.5 * 1e6
+    )
+    assert len(list(source.iter_windows())) > 1
+    _assert_windows_match_read_samples(source)
+
+
+def test_build_resolves_a_reference_to_a_segment_to_the_stitched_ids():
+    nwb = _nwb_with_electrodes(2)
+    data = np.zeros((4, 2))
+    _add_segment(nwb, "first", [0, 1], data=data, rate=512.0, starting_time=0.0)
+    second = _add_segment(
+        nwb, "second", [0, 1], data=data, rate=512.0, starting_time=1.0
+    )
+    nwb.add_epoch(start_time=1.0, stop_time=1.001, timeseries=[second])
+    epochs = next(
+        src for src in build_sources_from_nwb(nwb).events if src.id == "epochs"
+    )
+    assert epochs.read_channel_ids(0, 1) == [["0", "1"]]
+
+
+def test_build_rejects_series_that_share_some_electrodes_but_not_all():
+    nwb = _nwb_with_electrodes(3)
+    _add_segment(nwb, "a", [0, 1], data=np.zeros((4, 2)), rate=512.0)
+    _add_segment(nwb, "b", [1, 2], data=np.zeros((4, 2)), rate=512.0)
+    with pytest.raises(ValueError, match="b and a share electrode id '1'"):
+        build_sources_from_nwb(nwb)
+
+
+def test_build_rejects_segments_that_overlap():
+    nwb = _nwb_with_electrodes(2)
+    data = np.zeros((4, 2))
+    _add_segment(nwb, "a", [0, 1], data=data, rate=512.0, starting_time=0.0)
+    _add_segment(nwb, "b", [0, 1], data=data, rate=512.0, starting_time=2 / 512)
+    with pytest.raises(ValueError, match="b starts before a ends"):
+        build_sources_from_nwb(nwb)
+
+
+def test_build_rejects_a_segment_off_the_grid_of_the_earliest():
+    nwb = _nwb_with_electrodes(2)
+    data = np.zeros((4, 2))
+    _add_segment(nwb, "a", [0, 1], data=data, rate=512.0, starting_time=0.0)
+    _add_segment(
+        nwb, "b", [0, 1], data=data, rate=512.0, starting_time=10.4 / 512
+    )
+    with pytest.raises(ValueError, match="b is .* us off the 512 Hz .* of a"):
+        build_sources_from_nwb(nwb)
+
+
+def test_build_rejects_a_segment_with_a_unit_outside_the_volts_family():
+    nwb = _nwb_with_electrodes(2)
+    data = np.zeros((4, 2))
+    _add_segment(nwb, "a", [0, 1], data=data, rate=512.0, starting_time=0.0)
+    late = _add_segment(
+        nwb, "b", [0, 1], data=data, rate=512.0, starting_time=1.0
+    )
+    late.fields["unit"] = "furlongs"
+    with pytest.raises(ValueError, match="furlongs"):
+        build_sources_from_nwb(nwb)
+
+
+def test_build_gives_units_the_rate_of_a_series_sampled_by_timestamps():
+    nwb = _nwb_with_electrodes(2)
+    _add_segment(
+        nwb,
+        "stamped",
+        [0, 1],
+        data=np.zeros((10, 2)),
+        timestamps=np.arange(10) / 250.0,
+    )
+    nwb.units = _make_units(_TWO_UNITS, name="units")
+    (units,) = build_sources_from_nwb(nwb).events
+    assert units.waveform_period_us() == pytest.approx(4000.0)
