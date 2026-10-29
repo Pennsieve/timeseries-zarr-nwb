@@ -1,16 +1,23 @@
 from pathlib import Path
 
 import pytest
-from timeseries_zarr import MAX_LEVELS, WriteOpts, channel_writer_bytes
+from timeseries_zarr import (
+    DEFAULT_DECIMATION_FACTOR,
+    WriteOpts,
+    channel_writer_bytes,
+    max_levels_for,
+)
 
 from timeseries_zarr_nwb.config import (
     DEFAULT_SWEEP_BYTES,
     MAX_ZSTD_LEVEL,
+    MIN_DECIMATION_FACTOR,
     WINDOW_RESERVE_BYTES,
     Config,
     load_config,
 )
 
+DEFAULT_LEVEL_CAP = max_levels_for(DEFAULT_DECIMATION_FACTOR)
 ARGV = ["in.nwb", "out_bundle"]
 
 
@@ -57,8 +64,17 @@ def test_env_settings_override_defaults():
             MAX_ZSTD_LEVEL + 1,
             f"0 to {MAX_ZSTD_LEVEL}",
         ),
-        ("ZARR_WRITER_MAX_LEVELS", -1, f"0 to {MAX_LEVELS}"),
-        ("ZARR_WRITER_MAX_LEVELS", MAX_LEVELS + 1, f"0 to {MAX_LEVELS}"),
+        (
+            "ZARR_WRITER_DECIMATION_FACTOR",
+            MIN_DECIMATION_FACTOR - 1,
+            f"{MIN_DECIMATION_FACTOR} or more",
+        ),
+        ("ZARR_WRITER_MAX_LEVELS", -1, f"0 to {DEFAULT_LEVEL_CAP}"),
+        (
+            "ZARR_WRITER_MAX_LEVELS",
+            DEFAULT_LEVEL_CAP + 1,
+            f"0 to {DEFAULT_LEVEL_CAP}",
+        ),
         ("ZARR_WRITER_MIN_BINS", 0, "1 or more"),
         ("ZARR_WRITER_INNER_LEN", 0, "1 or more"),
         ("ZARR_WRITER_INNER_LEN", -1, "1 or more"),
@@ -77,8 +93,13 @@ def test_a_setting_outside_its_range_raises(key, value, valid):
     [
         ("ZARR_WRITER_ZSTD_LEVEL", 0, "zstd_level"),
         ("ZARR_WRITER_ZSTD_LEVEL", MAX_ZSTD_LEVEL, "zstd_level"),
+        (
+            "ZARR_WRITER_DECIMATION_FACTOR",
+            MIN_DECIMATION_FACTOR,
+            "decimation_factor",
+        ),
         ("ZARR_WRITER_MAX_LEVELS", 0, "max_levels"),
-        ("ZARR_WRITER_MAX_LEVELS", MAX_LEVELS, "max_levels"),
+        ("ZARR_WRITER_MAX_LEVELS", DEFAULT_LEVEL_CAP, "max_levels"),
         ("ZARR_WRITER_MIN_BINS", 1, "min_bins"),
         ("ZARR_WRITER_INNER_LEN", 1, "inner_len"),
         ("ZARR_WRITER_TARGET_SHARD_BYTES", 1, "target_shard_bytes"),
@@ -87,6 +108,40 @@ def test_a_setting_outside_its_range_raises(key, value, valid):
 def test_accepts_a_setting_at_an_end_of_its_range(key, value, field):
     cfg = load_config({key: str(value)}, ARGV)
     assert getattr(cfg.opts, field) == value
+
+
+def test_the_max_levels_range_follows_the_decimation_factor():
+    cap = max_levels_for(2)
+    cfg = load_config(
+        {
+            "ZARR_WRITER_DECIMATION_FACTOR": "2",
+            "ZARR_WRITER_MAX_LEVELS": str(cap),
+        },
+        ARGV,
+    )
+    assert cfg.opts.decimation_factor == 2
+    assert cfg.opts.max_levels == cap
+
+
+def test_rejects_max_levels_above_the_cap_for_the_decimation_factor():
+    cap = max_levels_for(10)
+    with pytest.raises(
+        ValueError,
+        match=f"^ZARR_WRITER_MAX_LEVELS must be 0 to {cap}, got {cap + 1}$",
+    ):
+        load_config(
+            {
+                "ZARR_WRITER_DECIMATION_FACTOR": "10",
+                "ZARR_WRITER_MAX_LEVELS": str(cap + 1),
+            },
+            ARGV,
+        )
+
+
+def test_an_unset_max_levels_writes_every_level_the_factor_allows():
+    cfg = load_config({"ZARR_WRITER_DECIMATION_FACTOR": "2"}, ARGV)
+    assert cfg.opts.max_levels is None
+    assert cfg.opts.level_cap == max_levels_for(2)
 
 
 def test_zero_positionals_raises():

@@ -6,16 +6,19 @@ from pathlib import Path
 from typing import Final
 
 from timeseries_zarr import (
-    MAX_LEVELS,
     WINDOW_BATCH_BYTES,
     WriteOpts,
     channel_writer_bytes,
+    max_levels_for,
 )
 
 from timeseries_zarr_nwb.nwb_reader import WINDOW_BYTES
 
 MAX_ZSTD_LEVEL: Final = 22
 """Highest Zstd compression level the codec accepts."""
+
+MIN_DECIMATION_FACTOR: Final = 2
+"""Smallest decimation factor the writer accepts."""
 
 DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
 """Default bytes of memory for the writers and windows of one group of channels."""
@@ -57,8 +60,9 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     the output path. The writer settings come from the ZARR_WRITER_ prefixed
     variables; unset settings fall back to the WriteOpts defaults.
     ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
-    ZARR_WRITER_MAX_LEVELS takes 0 through MAX_LEVELS, and 0 writes raw
-    samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
+    ZARR_WRITER_DECIMATION_FACTOR takes MIN_DECIMATION_FACTOR or more.
+    ZARR_WRITER_MAX_LEVELS takes 0 through max_levels_for that factor, and
+    0 writes raw samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
     ZARR_WRITER_TARGET_SHARD_BYTES, ZARR_WRITER_SWEEP_BYTES, and
     ZARR_WRITER_MAX_WORKERS take 1 or more. ZARR_WRITER_SWEEP_BYTES defaults
     to DEFAULT_SWEEP_BYTES, and ZARR_WRITER_MAX_WORKERS to the CPUs available.
@@ -74,6 +78,23 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
         if "ZARR_WRITER_MAX_WORKERS" in env
         else defaults.max_workers
     )
+    decimation_factor = _int_env(
+        env,
+        "ZARR_WRITER_DECIMATION_FACTOR",
+        defaults.decimation_factor,
+        MIN_DECIMATION_FACTOR,
+    )
+    max_levels = (
+        _int_env(
+            env,
+            "ZARR_WRITER_MAX_LEVELS",
+            0,
+            0,
+            max_levels_for(decimation_factor),
+        )
+        if "ZARR_WRITER_MAX_LEVELS" in env
+        else defaults.max_levels
+    )
     opts = WriteOpts(
         zstd_level=_int_env(
             env,
@@ -82,9 +103,8 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
             0,
             MAX_ZSTD_LEVEL,
         ),
-        max_levels=_int_env(
-            env, "ZARR_WRITER_MAX_LEVELS", defaults.max_levels, 0, MAX_LEVELS
-        ),
+        decimation_factor=decimation_factor,
+        max_levels=max_levels,
         min_bins=_int_env(env, "ZARR_WRITER_MIN_BINS", defaults.min_bins, 1),
         inner_len=_int_env(env, "ZARR_WRITER_INNER_LEN", defaults.inner_len, 1),
         target_shard_bytes=_int_env(
