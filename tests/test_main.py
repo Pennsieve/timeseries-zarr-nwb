@@ -12,6 +12,7 @@ from pynwb.ecephys import ElectricalSeries
 from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
+from timeseries_zarr import open_bundle
 
 from timeseries_zarr_nwb.main import main, run
 
@@ -187,6 +188,45 @@ def test_main_writes_nan_in_the_gaps_of_a_recording_split_into_segments(
     provenance = channel["attributes"]["tsz"]["provenance"]
     assert provenance["segments"] == ["first", "second"]
     assert not (out / "1").exists()
+
+
+def _write_paused_nwb(path, stamps):
+    """Write one series of 1000 Hz timestamps with one value per timestamp."""
+    nwb = mock_NWBFile()
+    mock_ElectricalSeries(
+        name="es",
+        nwbfile=nwb,
+        data=np.arange(len(stamps), dtype=np.float64).reshape(-1, 1),
+        timestamps=stamps,
+    )
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    return path
+
+
+def test_main_stores_the_exact_resume_time_of_a_pause_off_the_grid(tmp_path):
+    stamps = 0.5 + np.concatenate([np.arange(8), 20.4 + np.arange(5)]) / 1000.0
+    nwb = _write_paused_nwb(tmp_path / "session.nwb", stamps)
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+
+    runs = zarr.open_array(out / "0" / "runs", mode="r")[:]
+    assert runs[:, 0].tolist() == [0, 20]
+    assert runs[:, 1].tolist() == [8, 5]
+    assert runs[1, 2] - runs[0, 2] == 20_400
+    raw = zarr.open_array(out / "0" / "raw", mode="r")[:]
+    assert raw.shape == (25,)
+    assert np.isnan(raw[8:20]).all()
+    assert raw[:8].tolist() == [i * 1e6 for i in range(8)]
+    assert raw[20:].tolist() == [i * 1e6 for i in range(8, 13)]
+
+    with open_bundle(out) as bundle:
+        samples = bundle.continuous[0].read()
+        recorded = ~np.isnan(samples.values)
+        assert recorded.sum() == 13
+        assert samples.time_us[recorded] - samples.time_us[recorded][0] == (
+            pytest.approx((stamps - stamps[0]) * 1e6, abs=1.0)
+        )
 
 
 def test_main_writes_the_identifier_when_the_environment_asks(

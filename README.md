@@ -37,13 +37,15 @@ channels. Voltage samples are stored in microvolts. A series in any other unit
 keeps its unit.
 
 A series sampled by timestamps takes its rate from them. Most steps between its
-first 4096 timestamps must be one sample period. The converter fills each
-longer step with NaN values. Two or more `ElectricalSeries` that list the same
-electrodes in the same order are the segments of one recording. The converter
-writes one channel per electrode, with the segments in time order on the sample
-grid of the earliest segment and NaN values in the gaps. It rejects a file when
-a timestamp or a segment is more than 1 us off its sample grid, or when two
-segments overlap.
+first 4096 timestamps must be one sample period. Each longer step is a pause,
+and the converter starts a new run at the timestamp that ends it. Two or more
+`ElectricalSeries` that list the same electrodes in the same order are the
+segments of one recording. The converter writes one channel per electrode, with
+the segments in time order as its runs. The bundle holds the exact time of each
+run in its `runs` array, and NaN values fill the pauses on the sample grid. The
+converter rejects a file when a timestamp is more than 1 us off the sample grid
+of its run, when the sample rate of a segment drifts more than 1 us from that of
+the earliest segment over a run, or when two segments overlap.
 
 The subject, the session, the session start time, and the reference time go
 into `recording.json` at the bundle root and into no other metadata. The
