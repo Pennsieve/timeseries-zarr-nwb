@@ -3,6 +3,7 @@ from importlib.metadata import version
 
 import numpy as np
 import pytest
+import zarr
 from hdmf.common import DynamicTableRegion
 from pynwb import NWBHDF5IO, H5DataIO, NWBFile, TimeSeries
 from pynwb.base import ProcessingModule
@@ -19,6 +20,7 @@ from pynwb.testing.mock.file import mock_NWBFile
 from timeseries_zarr import (
     EventChannelSource,
     MultiChannelSource,
+    Run,
     WriteOpts,
     write_bundle,
 )
@@ -574,7 +576,7 @@ def test_timeseries_source_names_the_columns_of_a_rank_two_series():
     )
 
 
-def test_timeseries_source_fills_a_gap_between_timestamps_with_nan():
+def test_timeseries_source_reads_recorded_samples_across_a_pause():
     stamps = np.concatenate([np.arange(4), 10 + np.arange(3)]) / 512.0
     ts = mock_TimeSeries(
         name="gapped",
@@ -583,14 +585,16 @@ def test_timeseries_source_fills_a_gap_between_timestamps_with_nan():
         timestamps=stamps,
     )
     src = NwbTimeSeriesSource(ts, 0, STARTED)
-    assert src.num_samples() == 13
-    expected = np.full(13, np.nan, dtype=np.float32)
-    expected[0:4] = [0, 1, 2, 3]
-    expected[10:13] = [4, 5, 6]
-    assert np.array_equal(src.read_samples(0, 13), expected, equal_nan=True)
-    assert np.array_equal(
-        src.read_samples(2, 11), expected[2:11], equal_nan=True
-    )
+    assert src.num_samples() == 7
+    expected = np.arange(7, dtype=np.float32)
+    assert np.array_equal(src.read_samples(0, 7), expected)
+    assert np.array_equal(src.read_samples(2, 6), expected[2:6])
+    started_us = round(STARTED.timestamp() * 1_000_000)
+    assert src.runs() == [
+        Run(started_us, 4),
+        Run(started_us + round(10 / 512.0 * 1_000_000), 3),
+    ]
+    assert src.start_us() == src.runs()[0].start_us
 
 
 def test_timeseries_source_rejects_data_above_rank_two():
@@ -662,11 +666,11 @@ def test_build_rejects_two_sources_with_one_id():
         build_sources_from_nwb(nwb)
 
 
-def test_build_reports_a_timestamp_off_the_sample_grid():
+def test_build_reports_a_timestamp_off_the_sample_grid_of_its_run():
     nwb = mock_NWBFile()
     mock_ElectricalSeries(nwbfile=nwb, data=np.zeros((10, 2)), rate=512.0)
     stamps = np.arange(10) / 512.0
-    stamps[6:] += 0.4 / 512.0
+    stamps[6] += 5e-6
     mock_TimeSeries(
         name="misaligned",
         nwbfile=nwb,
@@ -674,7 +678,9 @@ def test_build_reports_a_timestamp_off_the_sample_grid():
         unit="%",
         timestamps=stamps,
     )
-    with pytest.raises(ValueError, match="of misaligned is .* off its"):
+    with pytest.raises(
+        ValueError, match="of misaligned is .* off the .* of its run"
+    ):
         build_sources_from_nwb(nwb)
 
 
@@ -1379,13 +1385,15 @@ def test_build_stitches_series_over_the_same_electrodes_into_one_channel_each():
     assert [channel.id for channel in channels] == ["0", "1"]
     reference_us = round(nwb.timestamps_reference_time.timestamp() * 1_000_000)
     assert channels[1].start_us() == reference_us + 1_000_000
-    assert channels[1].num_samples() == 13
-    expected = np.full(13, np.nan, dtype=np.float32)
-    expected[0:4] = first[:, 1] * 1e6
-    expected[10:13] = second[:, 1] * 1e6
+    assert channels[1].num_samples() == 7
+    expected = np.concatenate([first[:, 1], second[:, 1]]) * 1e6
     assert np.array_equal(
-        channels[1].read_samples(0, 13), expected, equal_nan=True
+        channels[1].read_samples(0, 7), expected.astype(np.float32)
     )
+    assert channels[1].runs() == [
+        Run(reference_us + 1_000_000, 4),
+        Run(reference_us + 1_000_000 + round(10 / 512.0 * 1_000_000), 3),
+    ]
 
 
 def test_build_places_a_recording_at_its_first_series_with_segments_in_time_order():
@@ -1403,7 +1411,7 @@ def test_build_places_a_recording_at_its_first_series_with_segments_in_time_orde
     assert "segments" not in channels[2].provenance()
 
 
-def test_stitched_windows_match_read_samples_across_the_gap(small_windows):
+def test_stitched_windows_match_read_samples_across_the_pause(small_windows):
     nwb = _nwb_with_electrodes(5)
     _add_segment(
         nwb,
@@ -1425,9 +1433,9 @@ def test_stitched_windows_match_read_samples_across_the_gap(small_windows):
     )
     (source,) = build_sources_from_nwb(nwb).continuous
     channel = source.channels()[0]
-    assert channel.num_samples() == 1500
-    assert np.isnan(channel.read_samples(600, 1100)).all()
-    assert channel.read_samples(1100, 1101)[0] == np.float32(
+    assert channel.num_samples() == 1000
+    assert not np.isnan(channel.read_samples(0, 1000)).any()
+    assert channel.read_samples(600, 601)[0] == np.float32(
         _SAMPLES[600, 0] * 0.5 * 1e6
     )
     assert len(list(source.iter_windows())) > 1
@@ -1465,14 +1473,62 @@ def test_build_rejects_segments_that_overlap():
         build_sources_from_nwb(nwb)
 
 
-def test_build_rejects_a_segment_off_the_grid_of_the_earliest():
+def test_build_keeps_a_segment_that_resumes_off_the_grid_of_the_earliest():
     nwb = _nwb_with_electrodes(2)
     data = np.zeros((4, 2))
     _add_segment(nwb, "a", [0, 1], data=data, rate=512.0, starting_time=0.0)
     _add_segment(
         nwb, "b", [0, 1], data=data, rate=512.0, starting_time=10.4 / 512
     )
-    with pytest.raises(ValueError, match="b is .* us off the 512 Hz .* of a"):
+    (source,) = build_sources_from_nwb(nwb).continuous
+    channel = source.channels()[0]
+    reference_us = round(nwb.timestamps_reference_time.timestamp() * 1_000_000)
+    assert channel.runs() == [
+        Run(reference_us, 4),
+        Run(reference_us + round(10.4 / 512 * 1_000_000), 4),
+    ]
+
+
+def test_build_joins_abutting_segments_into_one_run():
+    nwb = _nwb_with_electrodes(1)
+    data = np.zeros((7, 1))
+    _add_segment(nwb, "a", [0], data=data, rate=30000.0, starting_time=0.0)
+    _add_segment(
+        nwb, "b", [0], data=data, rate=30000.0, starting_time=7 / 30000.0
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    reference_us = round(nwb.timestamps_reference_time.timestamp() * 1_000_000)
+    assert source.channels()[0].runs() == [Run(reference_us, 14)]
+
+
+def test_build_writes_no_runs_array_for_abutting_segments(tmp_path):
+    nwb = _nwb_with_electrodes(1)
+    data = np.arange(3000, dtype=np.float64).reshape(-1, 1)
+    _add_segment(nwb, "a", [0], data=data, rate=512.0, starting_time=0.0)
+    _add_segment(
+        nwb, "b", [0], data=data[:2000], rate=512.0, starting_time=3000 / 512
+    )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    out = tmp_path / "out.zarr"
+    write_bundle([source], [], output_path=out, opts=WriteOpts())
+    assert not (out / "0" / "runs").exists()
+    assert zarr.open_array(out / "0" / "raw", mode="r").shape == (5000,)
+
+
+def test_build_rejects_a_segment_whose_rate_drifts_from_the_earliest():
+    nwb = _nwb_with_electrodes(2)
+    _add_segment(
+        nwb, "a", [0, 1], data=np.zeros((4, 2)), rate=512.0, starting_time=0.0
+    )
+    _add_segment(
+        nwb,
+        "b",
+        [0, 1],
+        data=np.zeros((4000, 2)),
+        rate=512.01,
+        starting_time=1.0,
+    )
+    with pytest.raises(ValueError, match="b drifts .* us from the 512 Hz"):
         build_sources_from_nwb(nwb)
 
 

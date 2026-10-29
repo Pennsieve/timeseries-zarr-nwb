@@ -1,6 +1,7 @@
 """Concrete NWB adapters implementing the channel-source protocols."""
 
 import logging
+import math
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime
@@ -16,6 +17,7 @@ from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries, Units
 from timeseries_zarr import MAX_LABELS, UNIT_TO_UV, EventColumn, RecordingMeta
+from timeseries_zarr import Run as SourceRun
 from timeseries_zarr import __version__ as writer_version
 
 from timeseries_zarr_nwb.nwb_events import (
@@ -25,7 +27,12 @@ from timeseries_zarr_nwb.nwb_events import (
     NwbIntervalSource,
     container_provenance,
 )
-from timeseries_zarr_nwb.nwb_layout import Layout, series_layout, stitch
+from timeseries_zarr_nwb.nwb_layout import (
+    GRID_TOLERANCE_S,
+    Layout,
+    series_layout,
+    stitch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +50,36 @@ def _layout(series: TimeSeries) -> Layout:
 
 def _start_us(layout: Layout, reference_time: datetime) -> int:
     """Return wall-clock microseconds of sample 0, rounded to whole microseconds."""
-    start_s = reference_time.timestamp() + layout.start_s
-    return round(start_s * MICROSECONDS_PER_SECOND)
+    return _time_us(layout.start_s, reference_time)
+
+
+def _time_us(start_s: float, reference_time: datetime) -> int:
+    """Return start_s after reference_time as microseconds since the epoch."""
+    return round(
+        (reference_time.timestamp() + start_s) * MICROSECONDS_PER_SECOND
+    )
+
+
+def _runs_us(layout: Layout, reference_time: datetime) -> list[SourceRun]:
+    """Return the runs of a layout with their start times in microseconds.
+
+    A run that starts within GRID_TOLERANCE_S of the end of the run before it
+    continues that run, so a recording without a pause is one run.
+    """
+    period_s = 1 / layout.rate_hz
+    runs: list[SourceRun] = []
+    end_s = math.nan
+    for run in layout.runs:
+        if runs and abs(run.start_s - end_s) <= GRID_TOLERANCE_S:
+            runs[-1] = SourceRun(
+                runs[-1].start_us, runs[-1].num_samples + run.rows
+            )
+        else:
+            runs.append(
+                SourceRun(_time_us(run.start_s, reference_time), run.rows)
+            )
+        end_s = run.start_s + run.rows * period_s
+    return runs
 
 
 def _read_column(
@@ -100,10 +135,11 @@ def _scale(
 def _read_samples(
     layout: Layout, channel_index: int, start: int, stop: int
 ) -> npt.NDArray[np.float32]:
-    """Return one channel's [start, stop) grid samples as float32, NaN in gaps.
+    """Return one channel's [start, stop) recorded samples as float32.
 
-    Each run is scaled by its own series. A range that ends past the last
-    sample is cut at the last sample.
+    The samples of the runs follow one another, and a pause between runs adds
+    none. Each run is scaled by its own series. A range that ends past the
+    last sample is cut at the last sample.
     """
     stop = min(stop, layout.num_samples)
     samples = np.full(max(stop - start, 0), np.nan, dtype=np.float32)
@@ -147,9 +183,9 @@ class NwbContinuousSource:
         channel_index selects the column this source exposes; a rank-1 series
         holds one channel at index 0. reference_time is the wall-clock instant
         the series' times count from. nwb_path is the series' path in the
-        file, for the provenance. layout places the rows of the series, and
-        of the later segments of a stitched recording, on the channel's grid.
-        None lays out the series alone. Raises ValueError for a unit outside
+        file, for the provenance. layout holds the runs of the series, and
+        of the later segments of a stitched recording. None lays out the
+        series alone. Raises ValueError for a unit outside
         the volts family, or for timestamps series_layout rejects.
         """
         self._layout = _layout(electrical_series) if layout is None else layout
@@ -219,20 +255,25 @@ class NwbContinuousSource:
         """Return the wall-clock microseconds of sample index 0.
 
         The reference time plus the start of the earliest segment, rounded to
-        whole microseconds.
+        whole microseconds. It is the start of the first run.
         """
         return _start_us(self._layout, self._reference_time)
 
+    def runs(self) -> list[SourceRun]:
+        """Return the runs of the channel in time order."""
+        return _runs_us(self._layout, self._reference_time)
+
     def num_samples(self) -> int:
-        """Return the grid samples of the channel, gaps included."""
+        """Return the recorded samples of the channel, which a pause does not add to."""
         return self._layout.num_samples
 
     def read_samples(self, start: int, stop: int) -> npt.NDArray[np.float32]:
         """Return the half-open [start, stop) sample window as float32 microvolts.
 
         Applies each series' affine scaling, then converts from the series'
-        own unit to microvolts. A sample in a gap is NaN. An empty range
-        (stop <= start) yields a length-0 array.
+        own unit to microvolts. Index i counts recorded samples, so a pause
+        between runs adds no index. An empty range (stop <= start) yields a
+        length-0 array.
         """
         return _read_samples(self._layout, self._channel_index, start, stop)
 
@@ -259,8 +300,8 @@ class NwbTimeSeriesSource:
 
         channel_index selects the column of a rank-2 series and is 0 for a
         rank-1 series. nwb_path is the series' path in the file, for the
-        provenance. layout places the rows of the series on the channel's
-        grid, and None lays them out here. Raises ValueError for data with a
+        provenance. layout holds the runs of the series, and None lays them
+        out here. Raises ValueError for data with a
         rank above 2, or for timestamps series_layout rejects.
         """
         rank = len(series.data.shape)
@@ -310,16 +351,21 @@ class NwbTimeSeriesSource:
         """Return the wall-clock microseconds of sample index 0."""
         return _start_us(self._layout, self._reference_time)
 
+    def runs(self) -> list[SourceRun]:
+        """Return the runs of the channel in time order."""
+        return _runs_us(self._layout, self._reference_time)
+
     def num_samples(self) -> int:
-        """Return the grid samples of the channel, gaps included."""
+        """Return the recorded samples of the channel, which a pause does not add to."""
         return self._layout.num_samples
 
     def read_samples(self, start: int, stop: int) -> npt.NDArray[np.float32]:
         """Return the [start, stop) sample window as float32 in the channel unit.
 
         Applies the series' conversion and offset, then the volts-to-microvolts
-        factor when the unit is in the volts family. A sample in a gap is NaN.
-        An empty range (stop <= start) yields a length-0 array.
+        factor when the unit is in the volts family. Index i counts recorded
+        samples, so a pause between runs adds no index. An empty range
+        (stop <= start) yields a length-0 array.
         """
         return _read_samples(self._layout, self._channel_index, start, stop)
 
@@ -374,23 +420,16 @@ class NwbSeriesSource:
     def iter_windows(self) -> Iterator[npt.NDArray[np.float32]]:
         """Yield each window as a float32 array of (rows, channels).
 
-        The array has one column for each channel, in column order. A gap
-        between runs yields windows of NaN. A layout with no samples yields no
-        windows.
+        The array has one column for each channel, in column order. The
+        windows hold recorded rows only, so a pause between runs adds none. A
+        layout with no samples yields no windows.
         """
         width = len(self._columns)
-        end = 0
         for run in self._layout.runs:
             step = _window_rows(run.series, width)
-            gap = run.first_sample - end
-            if gap:
-                nan = np.full((min(gap, step), width), np.nan, dtype=np.float32)
-                for start in range(0, gap, step):
-                    yield nan[: min(step, gap - start)]
             yield from self._run_windows(
                 run.series, run.first_row, run.rows, step
             )
-            end = run.first_sample + run.rows
 
     def _run_windows(
         self, series: TimeSeries, first_row: int, rows: int, step: int
@@ -827,14 +866,14 @@ def build_sources_from_nwb(
     per column, in series order then column order. ElectricalSeries with the
     same electrode ids in the same order are the segments of one recording:
     they give one channel per electrode at the position of the first of them,
-    with the segments in time order on the grid of the earliest and NaN in
-    the gaps. Every other acquisition TimeSeries holding numeric samples of
-    rank 1 or 2 follows, one channel per column in the same order. A series
-    sampled by timestamps takes its rate from them, with NaN in the gaps
-    between them. continuous holds one multi-channel source per group of at
-    most max_sweep_channels consecutive columns of each recording or series,
-    and None puts every column in one group. The grouping leaves the channel
-    order unchanged. Event sources follow, one per non-empty table or series,
+    with the segments in time order as the runs of the channel. Every other
+    acquisition TimeSeries holding numeric samples of rank 1 or 2 follows, one
+    channel per column in the same order. A series sampled by timestamps takes
+    its rate from them, and each pause between them starts a run. continuous
+    holds one multi-channel source per group of at most max_sweep_channels
+    consecutive columns of each recording or series, and None puts every
+    column in one group. The grouping leaves the channel order unchanged.
+    Event sources follow, one per non-empty table or series,
     in this order: Units tables (see _iter_units_tables, waveform rate from
     the first ElectricalSeries), the epochs, trials, and invalid times
     tables, the other interval tables by name, EventsTable tables by name, and
