@@ -68,7 +68,8 @@ Every setting is optional.
 | Variable | Governs | Range | Default |
 |---|---|---|---|
 | `ZARR_WRITER_ZSTD_LEVEL` | Zstd compression level | 0 to 22 | 5 |
-| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples; 0 writes raw samples only | 0 to 15 | 15 |
+| `ZARR_WRITER_DECIMATION_FACTOR` | samples per bin of level 1, and the ratio of the bin widths of consecutive levels | 2 or more | 4 |
+| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples; 0 writes raw samples only | 0 to 15 at factor 4, 0 to 31 at factor 2 | every level the factor allows |
 | `ZARR_WRITER_MIN_BINS` | bin threshold for keeping a coarser level | 1 or more | 1024 |
 | `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
