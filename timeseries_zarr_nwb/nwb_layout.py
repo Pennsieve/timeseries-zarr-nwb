@@ -246,9 +246,9 @@ def _check_grid(series: TimeSeries, window_rows: int, found: _Runs) -> None:
             raise ValueError(
                 f"timestamp {start + index} of {series.name} is "
                 f"{error[index] * 1e6:.3f} us off the "
-                f"{1 / found.period_s:g} Hz sample grid of its run. A run "
-                f"holds samples one sample period apart, and jitter or drift "
-                f"beyond {GRID_TOLERANCE_S * 1e6:g} us has no place in it"
+                f"{1 / found.period_s:g} Hz sample grid of its run; every "
+                f"timestamp must be within {GRID_TOLERANCE_S * 1e6:g} us of "
+                "the grid of its run"
             )
 
 
@@ -285,9 +285,8 @@ def stitch(layouts: Sequence[Layout]) -> Layout:
             raise ValueError(
                 f"{name} drifts {drift * 1e6:.3f} us from the "
                 f"{base.rate_hz:g} Hz sample grid of {base.series[0].name} "
-                f"within one run. A run must stay within "
-                f"{GRID_TOLERANCE_S * 1e6:g} us of its grid, so every segment "
-                "needs the sample rate of the earliest segment"
+                f"within one run; the drift must stay within "
+                f"{GRID_TOLERANCE_S * 1e6:g} us"
             )
         if layout.start_s < end_s - GRID_TOLERANCE_S:
             raise ValueError(

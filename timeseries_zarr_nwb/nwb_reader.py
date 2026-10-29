@@ -5,7 +5,6 @@ import math
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime
-from fractions import Fraction
 from importlib.metadata import version
 from typing import Final, NamedTuple
 
@@ -28,7 +27,12 @@ from timeseries_zarr_nwb.nwb_events import (
     NwbIntervalSource,
     container_provenance,
 )
-from timeseries_zarr_nwb.nwb_layout import Layout, series_layout, stitch
+from timeseries_zarr_nwb.nwb_layout import (
+    GRID_TOLERANCE_S,
+    Layout,
+    series_layout,
+    stitch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,7 @@ def _start_us(layout: Layout, reference_time: datetime) -> int:
 
 
 def _time_us(start_s: float, reference_time: datetime) -> int:
-    """Return start_s seconds after reference_time as whole microseconds since the epoch."""
+    """Return start_s after reference_time as microseconds since the epoch."""
     return round(
         (reference_time.timestamp() + start_s) * MICROSECONDS_PER_SECOND
     )
@@ -59,18 +63,22 @@ def _time_us(start_s: float, reference_time: datetime) -> int:
 def _runs_us(layout: Layout, reference_time: datetime) -> list[SourceRun]:
     """Return the runs of a layout with their start times in microseconds.
 
-    Rounding two start times can place a run less than a microsecond before
-    the samples of the run ahead of it end. Such a run starts at that end,
-    because a run cannot start earlier.
+    A run that starts within GRID_TOLERANCE_S of the end of the run before it
+    continues that run, so a recording without a pause is one run.
     """
-    period_us = Fraction(MICROSECONDS_PER_SECOND) / Fraction(layout.rate_hz)
+    period_s = 1 / layout.rate_hz
     runs: list[SourceRun] = []
+    end_s = math.nan
     for run in layout.runs:
-        start_us = _time_us(run.start_s, reference_time)
-        if runs:
-            end_us = runs[-1].start_us + runs[-1].num_samples * period_us
-            start_us = max(start_us, math.ceil(end_us))
-        runs.append(SourceRun(start_us, run.rows))
+        if runs and abs(run.start_s - end_s) <= GRID_TOLERANCE_S:
+            runs[-1] = SourceRun(
+                runs[-1].start_us, runs[-1].num_samples + run.rows
+            )
+        else:
+            runs.append(
+                SourceRun(_time_us(run.start_s, reference_time), run.rows)
+            )
+        end_s = run.start_s + run.rows * period_s
     return runs
 
 
@@ -175,9 +183,9 @@ class NwbContinuousSource:
         channel_index selects the column this source exposes; a rank-1 series
         holds one channel at index 0. reference_time is the wall-clock instant
         the series' times count from. nwb_path is the series' path in the
-        file, for the provenance. layout places the rows of the series, and
-        of the later segments of a stitched recording, on the channel's grid.
-        None lays out the series alone. Raises ValueError for a unit outside
+        file, for the provenance. layout holds the runs of the series, and
+        of the later segments of a stitched recording. None lays out the
+        series alone. Raises ValueError for a unit outside
         the volts family, or for timestamps series_layout rejects.
         """
         self._layout = _layout(electrical_series) if layout is None else layout
@@ -292,8 +300,8 @@ class NwbTimeSeriesSource:
 
         channel_index selects the column of a rank-2 series and is 0 for a
         rank-1 series. nwb_path is the series' path in the file, for the
-        provenance. layout places the rows of the series on the channel's
-        grid, and None lays them out here. Raises ValueError for data with a
+        provenance. layout holds the runs of the series, and None lays them
+        out here. Raises ValueError for data with a
         rank above 2, or for timestamps series_layout rejects.
         """
         rank = len(series.data.shape)
@@ -861,10 +869,11 @@ def build_sources_from_nwb(
     with the segments in time order as the runs of the channel. Every other
     acquisition TimeSeries holding numeric samples of rank 1 or 2 follows, one
     channel per column in the same order. A series sampled by timestamps takes
-    its rate from them, and each pause between them starts a run. continuous holds one multi-channel source per group of at
-    most max_sweep_channels consecutive columns of each recording or series,
-    and None puts every column in one group. The grouping leaves the channel
-    order unchanged. Event sources follow, one per non-empty table or series,
+    its rate from them, and each pause between them starts a run. continuous
+    holds one multi-channel source per group of at most max_sweep_channels
+    consecutive columns of each recording or series, and None puts every
+    column in one group. The grouping leaves the channel order unchanged.
+    Event sources follow, one per non-empty table or series,
     in this order: Units tables (see _iter_units_tables, waveform rate from
     the first ElectricalSeries), the epochs, trials, and invalid times
     tables, the other interval tables by name, EventsTable tables by name, and

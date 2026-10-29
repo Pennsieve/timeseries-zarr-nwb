@@ -128,7 +128,8 @@ def test_jitter_beyond_the_tolerance_is_rejected():
     with pytest.raises(
         ValueError,
         match="timestamp 500 of stamped is 2.000 us off the 1000 Hz sample "
-        "grid of its run.*jitter or drift beyond 1 us",
+        "grid of its run; every timestamp must be within 1 us of the grid of "
+        "its run",
     ):
         series_layout(_stamped(stamps), WINDOW)
 
@@ -232,7 +233,7 @@ def test_stitch_rejects_a_segment_whose_rate_drifts_off_the_grid():
     with pytest.raises(
         ValueError,
         match=r"second drifts -9\.99\d us from the 1000 Hz sample grid of "
-        "first within one run",
+        "first within one run; the drift must stay within 1 us",
     ):
         stitch(layouts)
 

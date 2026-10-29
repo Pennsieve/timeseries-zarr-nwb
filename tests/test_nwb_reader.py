@@ -3,6 +3,7 @@ from importlib.metadata import version
 
 import numpy as np
 import pytest
+import zarr
 from hdmf.common import DynamicTableRegion
 from pynwb import NWBHDF5IO, H5DataIO, NWBFile, TimeSeries
 from pynwb.base import ProcessingModule
@@ -1488,9 +1489,7 @@ def test_build_keeps_a_segment_that_resumes_off_the_grid_of_the_earliest():
     ]
 
 
-def test_build_starts_an_abutting_segment_no_earlier_than_the_samples_before_it(
-    tmp_path,
-):
+def test_build_joins_abutting_segments_into_one_run():
     nwb = _nwb_with_electrodes(1)
     data = np.zeros((7, 1))
     _add_segment(nwb, "a", [0], data=data, rate=30000.0, starting_time=0.0)
@@ -1498,11 +1497,22 @@ def test_build_starts_an_abutting_segment_no_earlier_than_the_samples_before_it(
         nwb, "b", [0], data=data, rate=30000.0, starting_time=7 / 30000.0
     )
     (source,) = build_sources_from_nwb(nwb).continuous
-    first, second = source.channels()[0].runs()
-    assert second.start_us - first.start_us == 234
-    write_bundle(
-        [source], [], output_path=tmp_path / "out.zarr", opts=WriteOpts()
+    reference_us = round(nwb.timestamps_reference_time.timestamp() * 1_000_000)
+    assert source.channels()[0].runs() == [Run(reference_us, 14)]
+
+
+def test_build_writes_no_runs_array_for_abutting_segments(tmp_path):
+    nwb = _nwb_with_electrodes(1)
+    data = np.arange(3000, dtype=np.float64).reshape(-1, 1)
+    _add_segment(nwb, "a", [0], data=data, rate=512.0, starting_time=0.0)
+    _add_segment(
+        nwb, "b", [0], data=data[:2000], rate=512.0, starting_time=3000 / 512
     )
+    (source,) = build_sources_from_nwb(nwb).continuous
+    out = tmp_path / "out.zarr"
+    write_bundle([source], [], output_path=out, opts=WriteOpts())
+    assert not (out / "0" / "runs").exists()
+    assert zarr.open_array(out / "0" / "raw", mode="r").shape == (5000,)
 
 
 def test_build_rejects_a_segment_whose_rate_drifts_from_the_earliest():

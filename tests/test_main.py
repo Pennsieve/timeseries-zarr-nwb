@@ -188,6 +188,12 @@ def test_main_writes_nan_in_the_gaps_of_a_recording_split_into_segments(
     provenance = channel["attributes"]["tsz"]["provenance"]
     assert provenance["segments"] == ["first", "second"]
     assert not (out / "1").exists()
+    runs = zarr.open_array(out / "0" / "runs", mode="r")[:]
+    assert runs.tolist() == [
+        [0, 4, 500_000],
+        [10, 4, 510_000],
+        [20, 2, 520_000],
+    ]
 
 
 def _write_paused_nwb(path, stamps):
