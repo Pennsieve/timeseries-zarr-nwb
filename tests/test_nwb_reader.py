@@ -565,6 +565,32 @@ def test_timeseries_source_normalizes_a_volts_family_unit_to_microvolts():
     )
 
 
+@pytest.mark.parametrize("unit", ["V", "mV", "uV", "nV", "Volts", "MICROVOLTS"])
+def test_timeseries_source_converts_a_voltage_unit_as_written(unit):
+    ts = mock_TimeSeries(
+        name="aux", data=np.arange(10, dtype=np.float64), unit=unit, rate=512.0
+    )
+    assert NwbTimeSeriesSource(ts, 0, STARTED).unit == "uV"
+
+
+def test_timeseries_source_keeps_a_unit_that_matches_only_lowercased():
+    ts = mock_TimeSeries(
+        name="aux", data=np.arange(10, dtype=np.float64), unit="MV", rate=512.0
+    )
+    assert NwbTimeSeriesSource(ts, 0, STARTED).unit == "MV"
+
+
+def test_continuous_source_reports_an_unsupported_unit_as_written(
+    electrical_series,
+):
+    es = electrical_series()
+    es.fields["unit"] = "MV"
+    with pytest.raises(
+        ValueError, match="unsupported ElectricalSeries unit: 'MV'"
+    ):
+        NwbContinuousSource(es, 0, STARTED)
+
+
 def test_timeseries_source_names_the_columns_of_a_rank_two_series():
     data = np.arange(20, dtype=np.float64).reshape(10, 2)
     ts = mock_TimeSeries(name="resp", data=data, unit="cmH2O", rate=512.0)
