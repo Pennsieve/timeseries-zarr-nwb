@@ -102,9 +102,14 @@ def _read_column(
 def _uv_factor(series: TimeSeries) -> float | None:
     """Return the factor from the series unit to microvolts.
 
-    None means the unit is outside the volts family.
+    A unit matches a symbol of UNIT_TO_UV as written, or a spelled-out name
+    in any case. None means the unit is outside the volts family.
     """
-    return UNIT_TO_UV.get(str(series.unit).lower())
+    unit = str(series.unit)
+    factor = UNIT_TO_UV.get(unit)
+    if factor is None:
+        factor = UNIT_TO_UV.get(unit.lower())
+    return factor
 
 
 def _scale(
@@ -191,7 +196,7 @@ class NwbContinuousSource:
         self._layout = _layout(electrical_series) if layout is None else layout
         for segment in self._layout.series:
             if _uv_factor(segment) is None:
-                unit = str(segment.unit).lower()
+                unit = str(segment.unit)
                 raise ValueError(f"unsupported ElectricalSeries unit: {unit!r}")
         self._series = electrical_series
         self._channel_index = channel_index
