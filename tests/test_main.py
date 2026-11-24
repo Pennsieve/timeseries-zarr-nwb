@@ -7,12 +7,12 @@ import numpy as np
 import pytest
 import zarr
 from hdmf.common import DynamicTableRegion
-from pynwb import NWBHDF5IO
+from pynwb import NWBHDF5IO, TimeSeries
 from pynwb.ecephys import ElectricalSeries
 from pynwb.testing.mock.device import mock_Device
 from pynwb.testing.mock.ecephys import mock_ElectricalSeries
 from pynwb.testing.mock.file import mock_NWBFile
-from timeseries_zarr import open_bundle
+from timeseries_zarr import open_bundle, validate_bundle
 
 from timeseries_zarr_nwb.main import main, run
 
@@ -246,6 +246,65 @@ def test_main_writes_the_identifier_when_the_environment_asks(
         identifier = io.read().identifier
     recording = json.loads((out / "recording.json").read_text())
     assert recording["source"]["identifier"] == identifier
+
+
+def _write_nwb_with_events(path):
+    nwb = mock_NWBFile()
+    series = mock_ElectricalSeries(
+        name="es", nwbfile=nwb, data=np.zeros((4096, 2)), rate=1000.0
+    )
+    nwb.add_acquisition(
+        TimeSeries(name="pulse", data=np.zeros(4096), unit="bpm", rate=1000.0)
+    )
+    nwb.add_epoch(
+        start_time=0.5, stop_time=1.0, tags=["a"], timeseries=[series]
+    )
+    nwb.epochs.add_row(start_time=2.0, stop_time=3.0, tags=["b"], timeseries=[])
+    nwb.add_unit(spike_times=[0.5, 1.5], waveform_mean=np.arange(8.0))
+    nwb.add_unit(spike_times=[1.0], waveform_mean=np.arange(8.0))
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwb)
+    return path
+
+
+def test_main_writes_a_bundle_with_events_that_the_validator_accepts(
+    tmp_path,
+):
+    nwb = _write_nwb_with_events(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    assert validate_bundle(out, full=True) == []
+
+
+def test_main_writes_every_channel_for_an_event_without_a_reference(
+    tmp_path,
+):
+    nwb = _write_nwb_with_events(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    with open_bundle(out) as bundle:
+        epochs = next(
+            channel
+            for channel in bundle.events.values()
+            if "channels" in channel.columns
+        )
+        table = epochs.read()
+    assert table.channel_indices == [[0, 1], [0, 1, 2]]
+
+
+def test_main_writes_the_ladder_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR", "8,4")
+    monkeypatch.setenv("ZARR_WRITER_MIN_BINS", "1")
+    nwb = _write_nwb(tmp_path / "session.nwb")
+    out = tmp_path / "session.zarr"
+    assert main([str(nwb), str(out)]) == 0
+    with open_bundle(out) as bundle:
+        widths = [
+            level.samples_per_bin
+            for level in bundle.continuous[0].levels.values()
+        ]
+    assert widths[:3] == [8, 32, 128]
+    assert validate_bundle(out) == []
 
 
 def _bundle_channels(out):

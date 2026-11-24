@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pynwb import TimeSeries
 from pynwb.epoch import TimeIntervals
 from pynwb.event import EventsTable
 from pynwb.misc import AnnotationSeries
@@ -207,7 +208,33 @@ def test_timeseries_references_become_the_ids_of_that_series_channels():
     table = _epochs([(1.0, 2.0, ["a"], True), (0.0, 0.5, ["b"], False)])
     src = _source(table)
     assert src.columns() >= {"channels"}
-    assert src.read_channel_ids(0, 2) == [[], ["LA1", "LA2", "LA3"]]
+    assert src.read_channel_ids(1, 2) == [["LA1", "LA2", "LA3"]]
+
+
+def test_a_row_without_a_reference_applies_to_every_channel_in_the_bundle():
+    table = _epochs([(1.0, 2.0, ["a"], True), (0.0, 0.5, ["b"], False)])
+    src = _source(table, ids={"es": ["LA1", "LA2", "LA3"], "other": ["X"]})
+    assert src.read_channel_ids(0, 2) == [
+        ["LA1", "LA2", "LA3", "X"],
+        ["LA1", "LA2", "LA3"],
+    ]
+
+
+def test_a_row_that_names_only_absent_series_applies_to_no_channel():
+    nwb = mock_NWBFile()
+    present = mock_ElectricalSeries(
+        nwbfile=nwb, name="es", data=np.zeros((100, 3)), rate=1000.0
+    )
+    absent = TimeSeries(name="gone", data=np.zeros(10), unit="bpm", rate=1.0)
+    nwb.add_acquisition(absent)
+    nwb.add_epoch(
+        start_time=0.0, stop_time=1.0, tags=["a"], timeseries=[present]
+    )
+    nwb.add_epoch(
+        start_time=2.0, stop_time=3.0, tags=["b"], timeseries=[absent]
+    )
+    src = _source(nwb.epochs)
+    assert src.read_channel_ids(0, 2) == [["LA1", "LA2", "LA3"], []]
 
 
 def test_repeated_references_to_one_series_list_its_channels_once():

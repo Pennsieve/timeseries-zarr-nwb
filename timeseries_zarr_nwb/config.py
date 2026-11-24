@@ -60,8 +60,13 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     the output path. The writer settings come from the ZARR_WRITER_ prefixed
     variables; unset settings fall back to the WriteOpts defaults.
     ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
-    ZARR_WRITER_DECIMATION_FACTOR takes MIN_DECIMATION_FACTOR or more.
-    ZARR_WRITER_MAX_LEVELS takes 0 through max_levels_for that factor, and
+    ZARR_WRITER_DECIMATION_FACTOR and ZARR_WRITER_EVENT_DECIMATION_FACTOR
+    take MIN_DECIMATION_FACTOR or more.
+    ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR takes one such ratio or a comma
+    separated ladder of them, such as "8,4". Each override falls back to
+    ZARR_WRITER_DECIMATION_FACTOR when unset.
+    ZARR_WRITER_MAX_LEVELS takes 0 through the larger of max_levels_for the
+    continuous ladder and max_levels_for the event factor, and
     0 writes raw samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
     ZARR_WRITER_TARGET_SHARD_BYTES, ZARR_WRITER_SWEEP_BYTES, and
     ZARR_WRITER_MAX_WORKERS take 1 or more. ZARR_WRITER_SWEEP_BYTES defaults
@@ -84,14 +89,31 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
         defaults.decimation_factor,
         MIN_DECIMATION_FACTOR,
     )
-    max_levels = (
+    continuous_factor = _ladder_env(
+        env, "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR"
+    )
+    event_factor = (
         _int_env(
             env,
-            "ZARR_WRITER_MAX_LEVELS",
-            0,
-            0,
-            max_levels_for(decimation_factor),
+            "ZARR_WRITER_EVENT_DECIMATION_FACTOR",
+            decimation_factor,
+            MIN_DECIMATION_FACTOR,
         )
+        if "ZARR_WRITER_EVENT_DECIMATION_FACTOR" in env
+        else None
+    )
+    level_limit = max(
+        max_levels_for(
+            decimation_factor
+            if continuous_factor is None
+            else continuous_factor
+        ),
+        max_levels_for(
+            decimation_factor if event_factor is None else event_factor
+        ),
+    )
+    max_levels = (
+        _int_env(env, "ZARR_WRITER_MAX_LEVELS", 0, 0, level_limit)
         if "ZARR_WRITER_MAX_LEVELS" in env
         else defaults.max_levels
     )
@@ -104,6 +126,8 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
             MAX_ZSTD_LEVEL,
         ),
         decimation_factor=decimation_factor,
+        continuous_decimation_factor=continuous_factor,
+        event_decimation_factor=event_factor,
         max_levels=max_levels,
         min_bins=_int_env(env, "ZARR_WRITER_MIN_BINS", defaults.min_bins, 1),
         inner_len=_int_env(env, "ZARR_WRITER_INNER_LEN", defaults.inner_len, 1),
@@ -169,6 +193,35 @@ def _int_env(
     if maximum is not None and not minimum <= value <= maximum:
         raise ValueError(f"{key} must be {minimum} to {maximum}, got {value}")
     return value
+
+
+def _ladder_env(
+    env: Mapping[str, str], key: str
+) -> int | tuple[int, ...] | None:
+    """Return the decimation ladder in env for key, or None if it is unset.
+
+    The value is one integer or comma separated integers, each
+    MIN_DECIMATION_FACTOR or more. One integer returns as an int. Raises
+    ValueError if an entry is not an integer or is below the minimum.
+    """
+    raw = env.get(key)
+    if raw is None:
+        return None
+    ratios: list[int] = []
+    for part in raw.split(","):
+        try:
+            ratio = int(part)
+        except ValueError:
+            raise ValueError(
+                f"{key} must hold comma separated integers, got {raw!r}"
+            ) from None
+        if ratio < MIN_DECIMATION_FACTOR:
+            raise ValueError(
+                f"{key} must hold ratios of {MIN_DECIMATION_FACTOR} or more, "
+                f"got {raw!r}"
+            )
+        ratios.append(ratio)
+    return ratios[0] if len(ratios) == 1 else tuple(ratios)
 
 
 def _flag_env(env: Mapping[str, str], key: str, default: bool) -> bool:

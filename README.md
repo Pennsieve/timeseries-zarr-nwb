@@ -34,7 +34,8 @@ The converter reads every `ElectricalSeries` and every other numeric
 reads `Units` tables, interval tables (epochs, trials, invalid times, and any
 other `TimeIntervals`), `EventsTable` tables, and `AnnotationSeries` as event
 channels. Voltage samples are stored in microvolts. A series in any other unit
-keeps its unit.
+keeps its unit. An interval row that references series applies to the channels
+of those series. A row with no reference applies to every channel.
 
 A series sampled by timestamps takes its rate from them. Most steps between its
 first 4096 timestamps must be one sample period. Each longer step is a pause,
@@ -71,7 +72,9 @@ Every setting is optional.
 |---|---|---|---|
 | `ZARR_WRITER_ZSTD_LEVEL` | Zstd compression level | 0 to 22 | 5 |
 | `ZARR_WRITER_DECIMATION_FACTOR` | samples per bin of level 1, and the ratio of the bin widths of consecutive levels | 2 or more | 4 |
-| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples; 0 writes raw samples only | 0 to 15 at factor 4, 0 to 31 at factor 2 | every level the factor allows |
+| `ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR` | ratio for continuous channels, or a comma separated ladder such as `8,4`; the first ratio is the samples per bin of level 1 and the last repeats | 2 or more for each ratio | `ZARR_WRITER_DECIMATION_FACTOR` |
+| `ZARR_WRITER_EVENT_DECIMATION_FACTOR` | ratio between the periods of the count levels of event channels | 2 or more | `ZARR_WRITER_DECIMATION_FACTOR` |
+| `ZARR_WRITER_MAX_LEVELS` | most levels above the raw samples; 0 writes raw samples only | 0 to 15 at factor 4, 0 to 31 at factor 2 | every level the factors allow |
 | `ZARR_WRITER_MIN_BINS` | bin threshold for keeping a coarser level | 1 or more | 1024 |
 | `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
