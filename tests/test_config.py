@@ -144,6 +144,72 @@ def test_an_unset_max_levels_writes_every_level_the_factor_allows():
     assert cfg.opts.level_cap == max_levels_for(2)
 
 
+def test_decimation_overrides_unset_leave_the_writeopts_defaults():
+    cfg = load_config({}, ARGV)
+    assert cfg.opts.continuous_decimation_factor is None
+    assert cfg.opts.event_decimation_factor is None
+
+
+def test_a_continuous_ladder_is_read_as_comma_separated_ratios():
+    cfg = load_config({"ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8,4"}, ARGV)
+    assert cfg.opts.continuous_decimation_factor == (8, 4)
+    assert cfg.opts.continuous_factors == (8, 4)
+
+
+def test_one_continuous_ratio_is_an_int_and_leaves_the_base_factor():
+    cfg = load_config({"ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8"}, ARGV)
+    assert cfg.opts.continuous_decimation_factor == 8
+    assert cfg.opts.decimation_factor == DEFAULT_DECIMATION_FACTOR
+
+
+def test_the_event_factor_is_read_from_the_environment():
+    cfg = load_config({"ZARR_WRITER_EVENT_DECIMATION_FACTOR": "8"}, ARGV)
+    assert cfg.opts.event_decimation_factor == 8
+    assert cfg.opts.event_factor == 8
+
+
+@pytest.mark.parametrize("value", ["", "8,", "8,x", "1", "8,1", "4.5"])
+def test_rejects_a_malformed_continuous_ladder(value):
+    with pytest.raises(
+        ValueError, match="^ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR must"
+    ):
+        load_config({"ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": value}, ARGV)
+
+
+def test_rejects_an_event_factor_below_the_minimum():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "^ZARR_WRITER_EVENT_DECIMATION_FACTOR must be "
+            f"{MIN_DECIMATION_FACTOR} or more, got 1$"
+        ),
+    ):
+        load_config({"ZARR_WRITER_EVENT_DECIMATION_FACTOR": "1"}, ARGV)
+
+
+def test_the_max_levels_range_is_the_larger_limit_of_the_two_factors():
+    cap = max(max_levels_for((8, 2)), max_levels_for(4))
+    cfg = load_config(
+        {
+            "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8,2",
+            "ZARR_WRITER_MAX_LEVELS": str(cap),
+        },
+        ARGV,
+    )
+    assert cfg.opts.max_levels == cap
+    with pytest.raises(
+        ValueError,
+        match=f"^ZARR_WRITER_MAX_LEVELS must be 0 to {cap}, got {cap + 1}$",
+    ):
+        load_config(
+            {
+                "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8,2",
+                "ZARR_WRITER_MAX_LEVELS": str(cap + 1),
+            },
+            ARGV,
+        )
+
+
 def test_zero_positionals_raises():
     with pytest.raises(ValueError):
         load_config({}, [])

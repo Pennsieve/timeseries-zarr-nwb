@@ -129,22 +129,30 @@ def _read_channels(
     order: npt.NDArray[np.intp],
     channel_ids_by_series: Mapping[str, Sequence[str]],
 ) -> list[list[str]] | None:
-    """Return the channel ids each sorted row applies to, or None."""
+    """Return the channel ids each sorted row applies to, or None.
+
+    A row with no timeseries reference applies to the whole recording, so it
+    gets every channel id. A row whose references all name series outside the
+    bundle gets no channel id. The result is None when no row resolves to a
+    channel.
+    """
     if "timeseries" not in table.colnames:
         return None
     unresolved = 0
-    per_row: list[list[str]] = []
+    per_row: list[list[str] | None] = []
     for row in range(rows):
         ids: list[str] = []
+        referenced = False
         for reference in table["timeseries"][row]:
             series = reference.timeseries
             if series is None:
                 continue
+            referenced = True
             if series.name in channel_ids_by_series:
                 ids.extend(channel_ids_by_series[series.name])
             else:
                 unresolved += 1
-        per_row.append(list(dict.fromkeys(ids)))
+        per_row.append(list(dict.fromkeys(ids)) if referenced else None)
     if unresolved:
         logger.warning(
             "%s: %d timeseries references name a series with no channel "
@@ -154,7 +162,10 @@ def _read_channels(
         )
     if not any(per_row):
         return None
-    return [per_row[i] for i in order]
+    every_id = list(
+        dict.fromkeys(i for ids in channel_ids_by_series.values() for i in ids)
+    )
+    return [list(every_id) if per_row[i] is None else per_row[i] for i in order]
 
 
 class _EventArrays:
@@ -300,7 +311,7 @@ class NwbIntervalSource(_EventArrays):
     duration. The rows are sorted by start time, stably. The table's tags
     become label categories, its free-form columns become one JSON object of
     text per row, and its timeseries references become the channels the event
-    applies to.
+    applies to. A row with no reference applies to every channel.
     """
 
     def __init__(
